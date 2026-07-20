@@ -1,0 +1,28 @@
+# Secrets
+.env
+
+# Environnement Python
+.venv/
+__pycache__/
+*.pyc
+
+# Données (rejouées/téléchargées — jamais versionnées)
+data/*.csv
+data/incoming/
+data/olist/
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+
+# Checkpoints LangGraph (SQLite)
+*.sqlite
+*.sqlite3
+*.db
+
+# Airflow
+airflow/logs/
+
+# Divers
+.DS_Store
