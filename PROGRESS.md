@@ -18,7 +18,7 @@ choisies, de façon documentée.
 | Phase | Titre | Durée estimée | Statut |
 |:-:|-------|:-:|:-:|
 | 0 | Fondations & accès | 3–5 j | ✅ terminé le 2026-07-21 |
-| 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ⬜ |
+| 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | 🚧 en cours (1.1 ✅) |
 | 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | ⬜ |
 | 3 | Squelette agent LangGraph (7 nœuds) | 1–2 sem | ⬜ |
 | 4 | Agent réel + table `INCIDENTS` | 2 sem | ⬜ |
@@ -76,14 +76,17 @@ est tout vert ; les ADR 001/008/009 existent.
 documentées** (`ground_truth.yaml`). C'est le contrat de vérité du projet.
 
 ### 1.1 Acquisition & exploration d'Olist
-- [ ] Télécharger le dataset Olist (Kaggle, ~120 Mo, 9 fichiers CSV)
-- [ ] Explorer et documenter les 9 tables (notebook jetable ou `docs/dataset.md`) : clés, volumes,
-      plages de dates, taux de nulls naturels
-- [ ] Sélectionner le **sous-ensemble utile** (recommandé : `orders`, `order_items`, `order_payments`,
+- [x] Télécharger le dataset Olist (Kaggle, ~120 Mo, 9 fichiers CSV) *(fait 2026-07-21, manuel → `data/olist/`)*
+- [x] Explorer et documenter les 9 tables (notebook jetable ou `docs/dataset.md`) : clés, volumes,
+      plages de dates, taux de nulls naturels *(fait 2026-07-21 → `docs/dataset.md` ; intégrité FK 100 %)*
+- [x] Sélectionner le **sous-ensemble utile** (recommandé : `orders`, `order_items`, `order_payments`,
       `customers`, `products`, `geolocation`) — noter ce qu'on écarte et pourquoi
-- [ ] **Vérifier le cas sémantique réel** : requête sur `geolocation_city` → confirmer les variantes
+      *(validé 2026-07-21 : les 6 recommandées ; reviews/sellers/translation écartées, raisons dans dataset.md)*
+- [x] **Vérifier le cas sémantique réel** : requête sur `geolocation_city` → confirmer les variantes
       (`são paulo` / `sao paulo` / `sao paulo - sp`…) et mesurer leur ampleur. C'est le futur fil rouge ;
       s'il est trop faible, le plan B est l'injection (1.3)
+      *(confirmé 2026-07-21 : 135 800 `sao paulo` / 24 918 `são paulo` / 2 `sãopaulo` → plan B inutile ;
+      requête témoin dans `tests/` à faire en 1.4)*
 
 ### 1.2 Simulateur de rejeu (`data/replay.py`)
 - [ ] Découper les données par **date de commande** (`order_purchase_timestamp`) : 1 jour = 1 batch
@@ -115,8 +118,9 @@ documentées** (`ground_truth.yaml`). C'est le contrat de vérité du projet.
       exécutions produisent exactement les mêmes batchs
 - [ ] Test automatique : `ground_truth.yaml` et les anomalies effectivement présentes dans les fichiers
       coïncident (compteur par type)
-- [ ] Vérifier que le cas sémantique provoque un **double comptage mesurable** dans un agrégat par ville
-      (requête témoin conservée dans `tests/`)
+- [x] Vérifier que le cas sémantique provoque un **double comptage mesurable** dans un agrégat par ville
+      (requête témoin conservée dans `tests/`) *(fait 2026-07-21 : `tests/test_semantic_case.py`,
+      2 tests — la normalisation récupère >20 000 lignes ; skip automatique si dataset absent)*
 
 **☑ Phase terminée quand** : `replay --from J1 --to J90` + injection produisent des batchs reproductibles ;
 `ground_truth.yaml` est exhaustif ; le double comptage est prouvé par une requête.
