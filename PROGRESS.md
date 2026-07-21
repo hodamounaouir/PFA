@@ -89,29 +89,34 @@ documentées** (`ground_truth.yaml`). C'est le contrat de vérité du projet.
       requête témoin dans `tests/` à faire en 1.4)*
 
 ### 1.2 Simulateur de rejeu (`data/replay.py`)
-- [ ] Découper les données par **date de commande** (`order_purchase_timestamp`) : 1 jour = 1 batch
-- [ ] CLI : `python -m data.replay --day 2017-03-15` → écrit les fichiers du jour dans `data/incoming/`
-      (le dossier que l'ingestion lira)
-- [ ] Mode rattrapage : `--from ... --to ...` pour rejouer une plage (utile pour construire l'historique
+- [x] Découper les données par **date de commande** (`order_purchase_timestamp`) : 1 jour = 1 batch
+- [x] CLI : `python -m data.replay --day 2017-03-15` → écrit les fichiers du jour dans `data/incoming/`
+      (le dossier que l'ingestion lira) *(fait 2026-07-21 ; garde-fou : refuse un jour hors fenêtre)*
+- [x] Mode rattrapage : `--from ... --to ...` pour rejouer une plage (utile pour construire l'historique
       des profils vite)
-- [ ] Choisir la **fenêtre de rejeu** du projet (recommandé : ~90 jours dans une période dense de 2017-2018)
-      et la figer dans la config
-- [ ] Les tables de référence (produits, clients) sont livrées au jour 1 puis en delta
+- [x] Choisir la **fenêtre de rejeu** du projet (recommandé : ~90 jours dans une période dense de 2017-2018)
+      et la figer dans la config *(2018-03-01 → 2018-05-31, 92 j, figée dans `data/config.py` avec le seed)*
+- [x] Les tables de référence (produits, clients) sont livrées au jour 1 puis en delta
+      *(products + geolocation en entier au J1 ; customers arrive en delta quotidien avec les commandes)*
 
 ### 1.3 Injecteur d'anomalies (`data/inject.py`)
-- [ ] Architecture : une classe par type d'anomalie, activée par config `(jour, table, paramètres)` —
+- [x] Architecture : une classe par type d'anomalie, activée par config `(jour, table, paramètres)` —
       l'injecteur **modifie le batch du jour après rejeu**, il ne génère rien
-- [ ] Types à implémenter :
-  - [ ] **Dérive de schéma** : renommage de colonne (ex. `payment_value` → `amount` au jour J45)
-  - [ ] **Complétude** : passage à N % de nulls sur une colonne critique (ex. `customer_id` au jour J60)
-  - [ ] **Doublons** : duplication de X % des lignes d'un batch (jour J75)
-  - [ ] **Fichier tronqué** : batch coupé à 30 % de son volume (jour J80)
-  - [ ] **Sémantique (plan B)** : introduction de variantes de casse sur une colonne catégorielle —
-        seulement si le cas réel `sao paulo` (1.1) s'avère insuffisant
-- [ ] **Récidive** : la même anomalie de complétude est réinjectée à J60 **et** J85 → c'est ce qui
-      permettra de mesurer le gain mémoire (T1 vs T2) en phase 8
-- [ ] `data/ground_truth.yaml` : pour chaque anomalie → jour, table, colonne, type, ampleur, dimension
+      *(fait 2026-07-21 : `data/inject.py` — la config de l'injecteur EST `ground_truth.yaml` (source
+      unique) ; marqueur `.injected` contre la double corruption ; seed dérivé de `config.py`)*
+- [x] Types à implémenter :
+  - [x] **Dérive de schéma** : renommage de colonne (`payment_value` → `amount` au J45) ✓ vérifié
+  - [x] **Complétude** : 30 % de nulls sur `orders.customer_id` au J60 ✓ vérifié (51/171 vides)
+  - [x] **Doublons** : 15 % des lignes de `order_items` au J75 ✓ vérifié (413 → 475, 62 doublons)
+  - [x] **Fichier tronqué** : `orders` coupé à 30 % au J80 ✓ vérifié (139 → 42 lignes)
+  - [x] **Sémantique (plan B)** : ~~inutile~~ — cas réel `sao paulo` confirmé massif (1.1), consigné
+        dans `ground_truth.yaml` section `real_anomalies`
+- [x] **Récidive** : nulls identiques J60 **et** J85 (même colonne, même taux, lié par `recidive_of`)
+      → mesure du gain mémoire (T1 vs T2) en phase 8 ✓ vérifié (34/114 vides au J85)
+- [x] `data/ground_truth.yaml` : pour chaque anomalie → jour, table, colonne, type, ampleur, dimension
       DAMA. **Écrit ici, jamais modifié après que l'agent tourne** (honnêteté du benchmark)
+      *(fait 2026-07-21 : 5 anomalies injectées + 1 réelle (sémantique) ; cohérence day↔date vérifiée
+      par l'injecteur au chargement)*
 
 ### 1.4 Verrous méthodologiques
 - [ ] Rejeu + injection **déterministes** (`--seed 42` pour les choix aléatoires de lignes) : deux

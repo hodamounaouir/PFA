@@ -1,0 +1,82 @@
+# =============================================================================
+# GROUND TRUTH — contrat de vérité du projet (ADR 009)
+# =============================================================================
+# Ce fichier est à la fois LA CONFIG de l'injecteur (data/inject.py le lit)
+# et LE CORRIGÉ du benchmark (phase 8) : une seule source, zéro divergence.
+#
+# ⚠️ RÈGLE D'HONNÊTETÉ : modifiable pendant la construction (phases 1–3) ;
+# GELÉ dès que l'agent est évalué. Tout ajustement tardif doit être daté
+# et justifié dans le journal de PROGRESS.md.
+#
+# J1 = 2018-03-01 (fenêtre figée dans data/config.py, 92 jours)
+# =============================================================================
+
+anomalies:
+  - id: schema_drift_j45
+    day: 45
+    date: 2018-04-14
+    table: order_payments
+    type: rename_column
+    params: {column: payment_value, new_name: amount}
+    dama_dimension: validite
+    description: >
+      Dérive de schéma : le "fournisseur" renomme payment_value en amount sans
+      préavis. Tout consommateur de la colonne casse brutalement.
+
+  - id: nulls_j60
+    day: 60
+    date: 2018-04-29
+    table: orders
+    type: inject_nulls
+    params: {column: customer_id, rate: 0.30}
+    dama_dimension: completude
+    description: >
+      30 % des customer_id du batch vidés (colonne naturellement pleine à 100 %,
+      cf. docs/dataset.md). Détectable uniquement par profilage vs historique.
+
+  - id: duplicates_j75
+    day: 75
+    date: 2018-05-14
+    table: order_items
+    type: duplicate_rows
+    params: {rate: 0.15}
+    dama_dimension: unicite
+    description: >
+      15 % des lignes d'articles dupliquées (job exécuté deux fois) : le chiffre
+      d'affaires du jour gonfle silencieusement d'autant.
+
+  - id: truncate_j80
+    day: 80
+    date: 2018-05-19
+    table: orders
+    type: truncate_rows
+    params: {keep_rate: 0.30}
+    dama_dimension: completude
+    description: >
+      Fichier tronqué à 30 % de son volume (transfert interrompu) : bien formé
+      mais anormalement petit ; les items du jour deviennent orphelins.
+
+  - id: nulls_j85_recidive
+    day: 85
+    date: 2018-05-24
+    table: orders
+    type: inject_nulls
+    params: {column: customer_id, rate: 0.30}
+    dama_dimension: completude
+    recidive_of: nulls_j60
+    description: >
+      Récidive EXACTE de nulls_j60 : mesure le gain mémoire de l'agent
+      (T1 vs T2, objectif O7). Ne pas modifier indépendamment de nulls_j60.
+
+# Anomalie RÉELLE du dataset (non injectée — présente en permanence) :
+# l'agent doit aussi la détecter, elle compte dans le rappel du benchmark.
+real_anomalies:
+  - id: semantic_sao_paulo
+    table: geolocation
+    column: geolocation_city
+    type: semantic_variants
+    dama_dimension: coherence
+    evidence: "135 800 'sao paulo' / 24 918 'são paulo' / 2 'sãopaulo' (tests/test_semantic_case.py)"
+    description: >
+      Variantes de casse/accent de São Paulo : tout agrégat par ville éclate la
+      métropole en plusieurs lignes (85/15). Cas réel, preuve permanente dans tests/.
