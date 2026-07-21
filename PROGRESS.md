@@ -18,7 +18,7 @@ choisies, de façon documentée.
 | Phase | Titre | Durée estimée | Statut |
 |:-:|-------|:-:|:-:|
 | 0 | Fondations & accès | 3–5 j | ✅ terminé le 2026-07-21 |
-| 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | 🚧 en cours (1.1 ✅) |
+| 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ✅ terminé le 2026-07-21 |
 | 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | ⬜ |
 | 3 | Squelette agent LangGraph (7 nœuds) | 1–2 sem | ⬜ |
 | 4 | Agent réel + table `INCIDENTS` | 2 sem | ⬜ |
@@ -119,10 +119,13 @@ documentées** (`ground_truth.yaml`). C'est le contrat de vérité du projet.
       par l'injecteur au chargement)*
 
 ### 1.4 Verrous méthodologiques
-- [ ] Rejeu + injection **déterministes** (`--seed 42` pour les choix aléatoires de lignes) : deux
+- [x] Rejeu + injection **déterministes** (`--seed 42` pour les choix aléatoires de lignes) : deux
       exécutions produisent exactement les mêmes batchs
-- [ ] Test automatique : `ground_truth.yaml` et les anomalies effectivement présentes dans les fichiers
+      *(fait 2026-07-21 : `tests/test_replay_determinism.py` — hash SHA-256 identiques sur double rejeu)*
+- [x] Test automatique : `ground_truth.yaml` et les anomalies effectivement présentes dans les fichiers
       coïncident (compteur par type)
+      *(fait 2026-07-21 : `tests/test_ground_truth_coherence.py` — 7 tests : marqueurs, schéma J45,
+      taux de nulls J60/J85, doublons J75, troncature J80, récidive strictement identique)*
 - [x] Vérifier que le cas sémantique provoque un **double comptage mesurable** dans un agrégat par ville
       (requête témoin conservée dans `tests/`) *(fait 2026-07-21 : `tests/test_semantic_case.py`,
       2 tests — la normalisation récupère >20 000 lignes ; skip automatique si dataset absent)*
@@ -408,4 +411,5 @@ dans le temps imparti, testée en conditions réelles.
 | 2026-07-20 | — | Refonte v4 de la documentation (HITL pur) ; décision source hybride Olist | ADR 008 et 009 à rédiger en phase 0 |
 | 2026-07-20 | 0 | Repo GitHub `hodamounaouir/PFA` + structure + 1er commit poussé ; env Python 3.11 (uv), Makefile, .gitignore, .env.example | Identité git = compte perso |
 | 2026-07-21 | 0 | ✅ **Phase 0 terminée** : base `DATA_QUALITY` (RAW/STAGING/MARTS/OPS) via script rejouable, auto-suspend 60 s ; clé Groq validée ; Olist (9 CSV) sur le serveur ; `check_access.py` tout vert ; ADR 001/008/009 | Trial Snowflake perso (22 j restants) ; Kaggle API remplacée par téléchargement manuel ; source O1 n°2 = API REST FastAPI ; fil rouge `sao paulo` confirmé (85/15) |
+| 2026-07-21 | 1 | ✅ **Phase 1 terminée** : exploration → `docs/dataset.md` ; fenêtre 2018-03-01→05-31 figée ; `replay.py` (92 j rejoués) ; `inject.py` + `ground_truth.yaml` (5 anomalies vérifiées + cas réel São Paulo) ; 12 tests verts (témoin, déterminisme, cohérence corrigé↔batchs) | 6 tables retenues ; ground_truth = config d'injection (source unique) ; plan modifiable jusqu'au benchmark, gelé ensuite |
 |  |  |  |  |
