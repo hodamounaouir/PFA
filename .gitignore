@@ -5,6 +5,8 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
 
 # Données (rejouées/téléchargées — jamais versionnées)
 data/*.csv
