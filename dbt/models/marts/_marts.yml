@@ -1,0 +1,28 @@
+version: 2
+
+models:
+  - name: fct_daily_sales
+    description: "Gold : CA et nb de commandes par jour d'achat."
+    columns:
+      - name: sales_date
+        data_tests: [not_null, unique]
+  - name: fct_sales_by_city_state
+    description: >
+      Gold : ventes par ville/état du client. NB : customer_city est déjà normalisée
+      en ASCII par Olist → pas de fan-out ici. Le cas sémantique vit dans geolocation
+      (voir fct_geolocation_by_city).
+  - name: fct_geolocation_by_city
+    description: >
+      Gold : agrégat géo par ville/état. ⭐ Démonstrateur du trou sémantique
+      (ground_truth : semantic_sao_paulo) : são paulo / sao paulo / sãopaulo éclatés
+      en lignes distinctes. AUCUN test baseline ne l'attrape → réservé à l'agent.
+  - name: fct_delivery_delays
+    description: "Gold : délais de livraison par commande livrée."
+    columns:
+      - name: order_id
+        data_tests: [not_null]
+  - name: fct_avg_order_value
+    description: "Gold : panier moyen par jour."
+    columns:
+      - name: sales_date
+        data_tests: [not_null, unique]

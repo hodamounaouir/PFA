@@ -156,16 +156,25 @@ C'est aussi la **baseline du benchmark** — à figer.
   Dérive de schéma J45 confirmée dans `_SCHEMA_HISTORY` : `amount` au seul 2018-04-14, `payment_value`
   les 91 autres jours — conforme à `ground_truth.yaml` (`schema_drift_j45` = rename d'un seul batch)
 
-### 2.2 dbt : Silver puis Gold
-- [ ] `dbt init` + profil Snowflake ; conventions de nommage (`stg_`, `fct_`, `dim_`)
-- [ ] Modèles **Silver** : typage, dédoublonnage, normalisation *volontairement incomplète* —
-      la casse des villes n'est **pas** normalisée (c'est le trou que l'agent doit trouver)
-- [ ] Modèles **Gold** : ventes par jour, ventes par ville/état, délais de livraison, panier moyen
-- [ ] **dbt tests baseline** : `not_null`, `unique`, `relationships`, `accepted_values` — les règles
-      qu'un data engineer écrirait naturellement. **Figées et versionnées ici** (colonne « baseline » du
-      benchmark)
-- [ ] Vérifier par requête que la baseline **rate** le fan-out `sao paulo` (si elle l'attrape, le projet
-      perd son sujet — ajuster les tests baseline en le documentant)
+### 2.2 dbt : Silver puis Gold ✅ (2026-07-22)
+- [x] Projet dbt (`dbt/`) + profil Snowflake (via `.env`, `env_var`) ; conventions `stg_`/`fct_` ;
+      macro `generate_schema_name` → schémas Medallion exacts (STAGING/MARTS, sans préfixe dbt) ;
+      cibles Makefile `dbt-debug`/`dbt-run`/`dbt-test`/`dbt-build` (chargent le `.env`)
+- [x] Modèles **Silver** (6 vues `stg_`) : typage (`try_cast`/`try_to_timestamp`), clé `order_item_sk` ;
+      **PAS** de dédoublonnage (les doublons J75 doivent survivre pour le test `unique`) ;
+      `customer_city`/`geolocation_city` **laissées brutes** (trou sémantique)
+- [x] Modèles **Gold** (5 tables `fct_`) : `daily_sales`, `sales_by_city_state`, `delivery_delays`,
+      `avg_order_value`, + `geolocation_by_city` (démonstrateur du fan-out)
+- [x] **dbt tests baseline** figés (`_staging.yml`) : `not_null`, `unique`, `relationships`,
+      `accepted_values`. Attrapent les 4 anomalies faciles → nulls customer_id (85), payment_amount J45
+      (150), doublons order_item_sk (62), troncature J80 via relationships (120 + 103). 13 PASS / 5 détections.
+      **NB : ces 5 échecs sont les *détections* de la baseline, pas des bugs** (à traiter comme signal en 2.3)
+- [x] Preuve `benchmarks/proof_semantic_gap.py` : la baseline **rate** le fan-out São Paulo
+      (`fct_geolocation_by_city` : `sao paulo` 135 799 / `são paulo` 24 917 / `sãopaulo` 2 → 3 lignes,
+      conforme à `ground_truth.yaml` `semantic_sao_paulo`)
+- **Correction en cours de route** : le fan-out est ancré sur `geolocation_city` (pas `customer_city`,
+  déjà ASCII chez Olist) → mart dédié `fct_geolocation_by_city` ajouté comme démonstrateur.
+- Dépendance ajoutée : `dbt-snowflake`
 
 ### 2.3 Orchestration Airflow
 - [ ] Airflow en local (Docker Compose)
@@ -421,4 +430,5 @@ dans le temps imparti, testée en conditions réelles.
 | 2026-07-21 | 0 | ✅ **Phase 0 terminée** : base `DATA_QUALITY` (RAW/STAGING/MARTS/OPS) via script rejouable, auto-suspend 60 s ; clé Groq validée ; Olist (9 CSV) sur le serveur ; `check_access.py` tout vert ; ADR 001/008/009 | Trial Snowflake perso (22 j restants) ; Kaggle API remplacée par téléchargement manuel ; source O1 n°2 = API REST FastAPI ; fil rouge `sao paulo` confirmé (85/15) |
 | 2026-07-21 | 1 | ✅ **Phase 1 terminée** : exploration → `docs/dataset.md` ; fenêtre 2018-03-01→05-31 figée ; `replay.py` (92 j rejoués) ; `inject.py` + `ground_truth.yaml` (5 anomalies vérifiées + cas réel São Paulo) ; 12 tests verts (témoin, déterminisme, cohérence corrigé↔batchs) | 6 tables retenues ; ground_truth = config d'injection (source unique) ; plan modifiable jusqu'au benchmark, gelé ensuite |
 | 2026-07-22 | 2 | 🚧 **2.1 Ingestion Bronze** : `ingestion/load.py` (brut→RAW, VARCHAR, idempotent, `OPS._SCHEMA_HISTORY`) ; fenêtre entière chargée (92 j transactionnels + référentiels au J1) ; idempotence prouvée ; dérive schéma J45 (`payment_value`→`amount`) confirmée conforme au corrigé | pyarrow ajouté (write_pandas) ; `--day` = ce qu'Airflow appellera en 2.3 ; backfill manuel ≠ incrémental auto |
+| 2026-07-22 | 2 | 🚧 **2.2 dbt Silver+Gold** : projet dbt (6 vues `stg_` + 5 tables `fct_`), tests baseline figés attrapant les 4 anomalies faciles (13 PASS / 5 détections), preuve du trou sémantique (`fct_geolocation_by_city` : São Paulo en 3 lignes) | Fan-out ancré sur `geolocation_city` (pas `customer_city`, déjà ASCII) → mart démonstrateur dédié ; les 5 tests rouges = détections, pas des bugs (signal pour Airflow 2.3) |
 |  |  |  |  |

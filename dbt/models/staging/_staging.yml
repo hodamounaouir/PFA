@@ -1,0 +1,64 @@
+version: 2
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TESTS BASELINE — figés ici (colonne "baseline" du benchmark, phase 8).
+# Ce sont les règles qu'un data engineer écrit naturellement. Ils DOIVENT
+# attraper les anomalies "faciles" (nulls, doublons, dérive de schéma, troncature)
+# et RATER le cas sémantique des villes (réservé à l'agent).
+# ─────────────────────────────────────────────────────────────────────────────
+
+models:
+  - name: stg_orders
+    description: "Commandes typées (Silver)."
+    columns:
+      - name: order_id
+        description: "Clé primaire de la commande."
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: "Clé client. Nulls injectés au J60/J85 → not_null casse."
+        data_tests:
+          - not_null
+      - name: order_status
+        data_tests:
+          - accepted_values:
+              values: [delivered, invoiced, shipped, processing, unavailable, canceled, created, approved]
+
+  - name: stg_order_items
+    description: "Lignes de commande typées (Silver)."
+    columns:
+      - name: order_item_sk
+        description: "Clé de ligne (order_id-order_item_id). Doublons J75 → unique casse."
+        data_tests:
+          - unique
+          - not_null
+      - name: order_id
+        description: "FK vers les commandes. Troncature J80 → relationships casse."
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+
+  - name: stg_order_payments
+    description: "Paiements typés (Silver)."
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: payment_amount
+        description: "Montant. Renommage J45 (payment_value→amount) → NULL → not_null casse."
+        data_tests:
+          - not_null
+
+  - name: stg_customers
+    description: "Clients (Silver). customer_city laissée brute (trou sémantique)."
+    columns:
+      - name: customer_id
+        data_tests:
+          - unique
+          - not_null

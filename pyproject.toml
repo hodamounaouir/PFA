@@ -9,6 +9,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "snowflake-connector-python>=4.7.1",
     "pyarrow>=18.0.0",
+    "dbt-snowflake>=1.8.0",
 ]
 
 [tool.pytest.ini_options]

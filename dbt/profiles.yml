@@ -1,0 +1,17 @@
+# Connexion Snowflake pour dbt. Aucun secret en dur : tout vient du .env
+# (les mêmes variables que scripts/ et ingestion/load.py).
+# Lancer dbt via `make dbt ...` qui charge le .env avant d'appeler dbt.
+pfa:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+      schema: STAGING      # schéma par défaut (surchargé par +schema dans dbt_project.yml)
+      threads: 4
+      client_session_keep_alive: false

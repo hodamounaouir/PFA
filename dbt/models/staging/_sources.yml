@@ -1,0 +1,16 @@
+version: 2
+
+# Les sources = ce que l'ingestion Bronze (phase 2.1) a déposé dans RAW.
+# Tout est en VARCHAR ici ; c'est Silver (stg_*) qui type et nettoie.
+sources:
+  - name: raw
+    database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+    schema: RAW
+    description: "Couche Bronze : données Olist brutes, telles qu'ingérées."
+    tables:
+      - name: orders
+      - name: order_items
+      - name: order_payments
+      - name: customers
+      - name: products
+      - name: geolocation

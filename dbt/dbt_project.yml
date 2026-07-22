@@ -1,0 +1,24 @@
+name: pfa_dbt
+version: "1.0.0"
+config-version: 2
+
+# Profil de connexion (voir dbt/profiles.yml — lit les variables du .env).
+profile: pfa
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Couches Medallion : Silver → schéma STAGING, Gold → schéma MARTS.
+# (le macro generate_schema_name force le nom du schéma tel quel, sans préfixe)
+models:
+  pfa_dbt:
+    staging:
+      +schema: STAGING
+      +materialized: view
+    marts:
+      +schema: MARTS
+      +materialized: table
