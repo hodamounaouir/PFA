@@ -19,7 +19,7 @@ choisies, de façon documentée.
 |:-:|-------|:-:|:-:|
 | 0 | Fondations & accès | 3–5 j | ✅ terminé le 2026-07-21 |
 | 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ✅ terminé le 2026-07-21 |
-| 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | ⬜ |
+| 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | 🚧 en cours (2.1 ✅) |
 | 3 | Squelette agent LangGraph (7 nœuds) | 1–2 sem | ⬜ |
 | 4 | Agent réel + table `INCIDENTS` | 2 sem | ⬜ |
 | 5 | HITL complet : pause, reprise, Apply borné | 1–2 sem | ⬜ |
@@ -140,13 +140,21 @@ documentées** (`ground_truth.yaml`). C'est le contrat de vérité du projet.
 **Objectif** : Bronze → Silver → Gold de bout en bout, orchestré par Airflow, **sans une ligne d'IA**.
 C'est aussi la **baseline du benchmark** — à figer.
 
-### 2.1 Ingestion → Bronze
-- [ ] `ingestion/load.py` : lit `data/incoming/`, charge **brut** dans Snowflake `RAW` (aucune
-      transformation, aucun rejet)
-- [ ] Métadonnées sur chaque ligne : `_ingested_at`, `_source`, `_batch_id`
-- [ ] **Idempotence** : recharger le même batch ne duplique rien (clé sur `_batch_id`)
-- [ ] Capture du schéma observé à chaque ingestion → table `OPS._SCHEMA_HISTORY`
-      (nom des colonnes, types, ordre — c'est ce que lira `read_schema_history` en phase 4)
+### 2.1 Ingestion → Bronze ✅ (2026-07-22)
+- [x] `ingestion/load.py` : lit `data/incoming/`, charge **brut** dans Snowflake `RAW` (aucune
+      transformation, aucun rejet — tout en VARCHAR, référentiels products/geolocation chargés au J1 seul)
+- [x] Métadonnées sur chaque ligne : `_ingested_at` (DEFAULT Snowflake), `_source`, `_batch_id`
+- [x] **Idempotence** : recharger le même batch ne duplique rien (DELETE sur `_batch_id` puis réinsertion)
+- [x] Capture du schéma observé à chaque ingestion → table `OPS._SCHEMA_HISTORY`
+      (une ligne par colonne : nom, position ordinale — c'est ce que lira `read_schema_history` en phase 4)
+- CLI : `--day` (1 jour, ce qu'Airflow appellera en 2.3) / `--from`/`--to` / défaut = fenêtre entière
+- Dépendance ajoutée : `pyarrow` (requise par `write_pandas` ; l'extra `[pandas]` du connecteur exige
+  pandas<3, incompatible avec le projet — on installe pyarrow directement)
+- **Validé** : fenêtre entière chargée (92 jours transactionnels, 2018-03-01→2018-05-31 ;
+  orders=20 926, order_items=24 179, order_payments=21 856, customers=21 023 ;
+  products=32 951 et geolocation=1 000 163 au J1 seul). Idempotence prouvée (2 runs = mêmes comptes).
+  Dérive de schéma J45 confirmée dans `_SCHEMA_HISTORY` : `amount` au seul 2018-04-14, `payment_value`
+  les 91 autres jours — conforme à `ground_truth.yaml` (`schema_drift_j45` = rename d'un seul batch)
 
 ### 2.2 dbt : Silver puis Gold
 - [ ] `dbt init` + profil Snowflake ; conventions de nommage (`stg_`, `fct_`, `dim_`)
@@ -412,4 +420,5 @@ dans le temps imparti, testée en conditions réelles.
 | 2026-07-20 | 0 | Repo GitHub `hodamounaouir/PFA` + structure + 1er commit poussé ; env Python 3.11 (uv), Makefile, .gitignore, .env.example | Identité git = compte perso |
 | 2026-07-21 | 0 | ✅ **Phase 0 terminée** : base `DATA_QUALITY` (RAW/STAGING/MARTS/OPS) via script rejouable, auto-suspend 60 s ; clé Groq validée ; Olist (9 CSV) sur le serveur ; `check_access.py` tout vert ; ADR 001/008/009 | Trial Snowflake perso (22 j restants) ; Kaggle API remplacée par téléchargement manuel ; source O1 n°2 = API REST FastAPI ; fil rouge `sao paulo` confirmé (85/15) |
 | 2026-07-21 | 1 | ✅ **Phase 1 terminée** : exploration → `docs/dataset.md` ; fenêtre 2018-03-01→05-31 figée ; `replay.py` (92 j rejoués) ; `inject.py` + `ground_truth.yaml` (5 anomalies vérifiées + cas réel São Paulo) ; 12 tests verts (témoin, déterminisme, cohérence corrigé↔batchs) | 6 tables retenues ; ground_truth = config d'injection (source unique) ; plan modifiable jusqu'au benchmark, gelé ensuite |
+| 2026-07-22 | 2 | 🚧 **2.1 Ingestion Bronze** : `ingestion/load.py` (brut→RAW, VARCHAR, idempotent, `OPS._SCHEMA_HISTORY`) ; fenêtre entière chargée (92 j transactionnels + référentiels au J1) ; idempotence prouvée ; dérive schéma J45 (`payment_value`→`amount`) confirmée conforme au corrigé | pyarrow ajouté (write_pandas) ; `--day` = ce qu'Airflow appellera en 2.3 ; backfill manuel ≠ incrémental auto |
 |  |  |  |  |
