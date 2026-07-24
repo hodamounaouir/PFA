@@ -1,0 +1,90 @@
+# Airflow local (LocalExecutor + Postgres) pour exécuter le pipeline Medallion.
+# Pensé pour tourner sur un PC via Docker Desktop. Léger : pas de Celery/Redis.
+#
+# Démarrage (depuis le dossier airflow/) :
+#   docker compose build
+#   docker compose up airflow-init      # une seule fois : crée la base + l'utilisateur
+#   docker compose up -d                # lance webserver + scheduler
+#   → http://localhost:8080   (login: airflow / mot de passe: airflow)
+#
+# Voir airflow/README.md pour le mode d'emploi complet (Windows).
+
+x-airflow-common: &airflow-common
+  build: .
+  env_file:
+    - ../.env                 # identifiants Snowflake du projet (SNOWFLAKE_*)
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/airflow/dags
+    AIRFLOW__CORE__PARALLELISM: "4"          # PC : on reste raisonnable
+    PYTHONPATH: /opt/airflow/project          # rend `data`, `ingestion`, `benchmarks` importables
+  volumes:
+    - ../:/opt/airflow/project                # tout le repo (code + data/olist + .env + dbt)
+    - airflow-logs:/opt/airflow/logs          # logs en volume nommé (pas de souci de perms Windows)
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # Initialise la base de métadonnées Airflow + crée l'utilisateur admin (une fois).
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username airflow --password airflow \
+          --firstname Hoda --lastname PFA --role Admin \
+          --email admin@example.com || true
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db:
+  airflow-logs:

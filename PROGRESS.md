@@ -176,13 +176,19 @@ C'est aussi la **baseline du benchmark** — à figer.
   déjà ASCII chez Olist) → mart dédié `fct_geolocation_by_city` ajouté comme démonstrateur.
 - Dépendance ajoutée : `dbt-snowflake`
 
-### 2.3 Orchestration Airflow
-- [ ] Airflow en local (Docker Compose)
-- [ ] DAG `medallion_pipeline` : `replay+inject` → `ingest_bronze` → `dbt run` (silver) → `dbt test` →
-      `dbt run` (gold) → `dbt test` — paramétré par le jour rejoué
-- [ ] Backfill des ~30 premiers jours (sans anomalie injectée) → construit l'historique dont `Detect`
-      aura besoin
-- [ ] Archiver le résultat des tests baseline confronté à `ground_truth.yaml` → `benchmarks/baseline_run.json`
+### 2.3 Orchestration Airflow 🚧 (fichiers créés 2026-07-24 — exécution à faire sur le PC)
+> Airflow ne tourne pas sur le serveur (pas de Docker) : les fichiers sont écrits ici et
+> versionnés ; le DAG s'exécute **sur le PC** (Windows + Docker Desktop). Cf. `airflow/README.md`.
+- [x] Airflow en local (Docker Compose) — `airflow/Dockerfile` (image + venv **isolé** du pipeline)
+      + `airflow/docker-compose.yaml` (LocalExecutor + Postgres, repo monté, `.env` Snowflake branché)
+- [x] DAG `medallion_pipeline` : `replay` → `inject` (`--if-scheduled`) → `ingest_bronze` →
+      `dbt run/test` (silver) → `dbt run/test` (gold) → `archive_baseline` — paramétré par `{{ ds }}`,
+      `@daily`, `catchup=True`. Tests dbt tolérants : rc=1 (détections) = vert, rc=2 (erreur dbt) = rouge.
+- [x] Archivage `benchmarks/archive_baseline.py` → `benchmarks/baseline_run.json` (une entrée/jour,
+      confrontée à `ground_truth.yaml`). Ajout `--if-scheduled` à `data/inject.py` (additif, tests OK).
+- [ ] **À FAIRE sur le PC** : `docker compose build` + `up`, puis backfill des ~30 premiers jours
+      (jours propres, DAG 100 % vert) puis le reste de la fenêtre ; vérifier RAW/STAGING/MARTS peuplés
+      et `baseline_run.json` rempli (détections aux J45/J60/J75/J80/J85, cas São Paulo raté).
 
 **☑ Phase terminée quand** : le DAG est vert de bout en bout sur la fenêtre rejouée ; les 3 couches sont
 peuplées et interrogeables ; la baseline rate le cas sémantique (prouvé) ; `baseline_run.json` est archivé.

@@ -121,12 +121,19 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Injecte les anomalies de ground_truth.yaml")
     parser.add_argument("--day", type=date.fromisoformat,
                         help="n'injecter que ce jour (défaut : tous les jours à anomalie)")
+    parser.add_argument("--if-scheduled", action="store_true",
+                        help="mode orchestration (Airflow) : un jour sans anomalie prévue "
+                             "sort proprement (code 0) au lieu d'échouer")
     args = parser.parse_args(argv)
 
     by_date = load_anomalies_by_date()
     if args.day:
         if args.day not in by_date:
-            sys.exit(f"ℹ️ aucune anomalie prévue le {args.day} (cf. ground_truth.yaml)")
+            msg = f"ℹ️ aucune anomalie prévue le {args.day} (cf. ground_truth.yaml)"
+            if args.if_scheduled:
+                print(msg + " — batch laissé intact.")
+                return
+            sys.exit(msg)
         by_date = {args.day: by_date[args.day]}
 
     for day in sorted(by_date):

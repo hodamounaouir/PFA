@@ -1,0 +1,9 @@
+# Fins de ligne : LF partout dans le repo. Les scripts (DAG, Dockerfile, .env
+# sourcé, SQL dbt…) tournent dans des conteneurs Linux — des CRLF Windows les
+# casseraient. Important car le projet est édité aussi sous Windows.
+* text=auto eol=lf
+
+# Binaires : jamais de conversion de fins de ligne.
+*.png binary
+*.jpg binary
+*.csv binary
