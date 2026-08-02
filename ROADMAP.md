@@ -15,7 +15,7 @@ est écoulé. Si une phase déborde, on coupe dans le contenu de la phase, pas d
 | 0 | Fondations & accès | 3–5 j | — | 🔴 oui |
 | 1 | Jeu de données + anomalies injectées | 1 sem | L4 | 🔴 oui |
 | 2 | Pipeline Medallion sans agent | 2–3 sem | O1, L1 | 🔴 oui |
-| 3 | Squelette agent LangGraph (7 nœuds) | 1–2 sem | O2, L2 | 🔴 oui |
+| 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | O2, L2 | 🔴 oui |
 | 4 | Agent branché au pipeline + `INCIDENTS` | 2 sem | O2, O3, O7 | 🔴 oui |
 | 5 | HITL complet : pause, reprise, Apply borné | 1–2 sem | O5, L6 | 🔴 oui |
 | 6 | Observabilité Streamlit | 1–2 sem | O4, L3 | 🔴 démo |
@@ -171,47 +171,67 @@ c'est contre elle que tu mesureras tout le reste.
 
 ---
 
-# Phase 3 — Squelette agent LangGraph (7 nœuds)
+# Phase 3 — Squelette agent LangGraph (8 nœuds)
 **Durée** : 1–2 sem · **Couvre** : O2, L2 (partiel)
+
+> **Révision 2026-07-28** : 8 nœuds au lieu de 7, et `Propose` a **3 issues** au lieu de 2 (ajout du nœud
+> `Amend`). Les nœuds restant des stubs, la généricité décidée ce jour-là ne coûte rien ici — elle se
+> paie en phase 4. Voir §0bis du cahier des charges.
 
 ### Objectif
 Le graphe tourne de START à END avec des nodes **stubs**. On valide la mécanique LangGraph (y compris
 la pause/reprise), pas l'intelligence.
 
 ### Tâches
-- [ ] `AgentState` (TypedDict) — copier §5.2 du cahier, y compris `logs: Annotated[list, add]`
-- [ ] Les 7 nodes en version stub (valeurs codées en dur, aucun LLM sauf `Diagnose`) :
-      `Profile` · `Detect` · `Diagnose` · `Propose` · `Apply` · `Validate` · `Log`
+- [ ] ADR `010-agent-generique.md` — les 5 décisions du 2026-07-28, avec les alternatives écartées
+- [ ] `AgentState` (TypedDict) — §5.2 du cahier, y compris `logs: Annotated[list, add]`, `dataset`,
+      `contract` / `contract_version`, et `human_decision` à **trois** valeurs
+- [ ] Les 8 nodes en version stub (valeurs codées en dur, aucun LLM sauf `Diagnose`) :
+      `Profile` · `Detect` · `Diagnose` · `Propose` · `Apply` · **`Amend`** · `Validate` · `Log`
 - [ ] **Conditional edges** — il y en a exactement deux :
-      `Detect` → (`Diagnose` si anomalies, sinon `Log`) · `Propose` → (`Apply` si approuvé, sinon `Log`)
+      `Detect` → (`Diagnose` si anomalies, sinon `Log`) ·
+      `Propose` → (`Apply` si `approved`, `Amend` si `amend_contract`, `Log` si `rejected`) ⬅️ *3 branches*
 - [ ] **Checkpointer** (`SqliteSaver`) + `Propose` avec `interrupt()` : valider dès maintenant qu'une
       exécution **se met en pause, survit à un redémarrage du process, et reprend** avec une décision
       injectée (approbation simulée en CLI — Streamlit arrive en phase 6)
-- [ ] `Diagnose` : premier vrai appel LLM (Groq) + `PydanticOutputParser` pour forcer une sortie structurée
-      (`root_cause`, `proposed_fix`, `explanation`)
+- [ ] `Diagnose` : premier vrai appel LLM (Groq) + sortie structurée forcée par Pydantic
+      (`root_cause`, `proposed_fix`, `explanation`) ; échec de parsing → `diagnosis = None` et le run se
+      termine en « à traiter manuellement », **sans exception qui tue le graphe**
 - [ ] Export du graphe en PNG (`graph.get_graph().draw_mermaid_png()`) → il ira dans le README et la soutenance
 - [ ] Tests unitaires des nodes avec **LLM mocké** (prépare la CI de l'extension E3)
 
 ### Definition of Done
-- Le graphe s'exécute de START à END sur un état factice, **sur les trois chemins** : rien d'anormal →
-  Log ; anomalie + refus → Log ; anomalie + approbation → Apply → Validate → Log (3 tests).
+- Le graphe s'exécute de START à END sur un état factice, **sur les quatre chemins** : rien d'anormal →
+  Log ; anomalie + refus → Log ; anomalie + **amendement** → Amend → Log ; anomalie + approbation →
+  Apply → Validate → Log (4 tests).
 - Une exécution interrompue sur `Propose` **reprend après redémarrage du process** (test dédié).
-- **Le test de preuve P3 passe** : aucun chemin n'atteint `Apply` sans `human_decision == "approved"`.
+- **Le test de preuve P3 passe** : aucun chemin n'atteint `Apply` sans `human_decision == "approved"` —
+  et la branche `amend_contract` n'y mène pas.
+- **Le test de sortie unique passe** : les 4 chemins passent tous par `Log` avant END.
 - Le PNG du graphe est généré.
 
-### Piège
-Le LLM n'est appelé **que** dans `Diagnose` (§5.1 du cahier). Si tu te surprends à en appeler un dans
-`Detect` ou ailleurs, tu casses la propriété qui rend le projet défendable : *le graphe contrôle le flux,
-le LLM ne fait que raisonner*.
+### Pièges
+- Le LLM n'est appelé **que** dans `Diagnose` (§5.1 du cahier). Si tu te surprends à en appeler un dans
+  `Detect` ou ailleurs, tu casses la propriété qui rend le projet défendable : *le graphe contrôle le
+  flux, le LLM ne fait que raisonner*.
+- Le défaut de l'aiguillage après `Propose` doit être **`Log`, jamais `Apply`**. Une décision absente,
+  mal orthographiée ou inventée par un futur client ne doit pas pouvoir déclencher une écriture. Un run
+  qui finit à tort en « rien fait » se rattrape ; une écriture faite à tort, non.
 
 ---
 
-# Phase 4 — Agent branché au pipeline + table `INCIDENTS`
-**Durée** : 2 sem · **Couvre** : O2 (réel), O3, O7
+# Phase 4 — Socle générique + agent réel + table `INCIDENTS`
+**Durée** : ~3 sem · **Couvre** : O2 (réel), O3, O7
+
+> **Révision 2026-07-28** : c'est ici que se paie la généricité — la phase gagne le **socle
+> interchangeable** (connecteurs + registre `datasets/*.yaml`) et le **cycle Découverte** (introspection,
+> caractérisation par rôle de colonne, contrats YAML validés par l'humain), et passe de 2 à ~3 semaines.
+> Le découpage étape par étape est dans [`PROGRESS.md`](PROGRESS.md#phase-4) — cette page ne garde que
+> la Definition of Done.
 
 ### Objectif
-Les stubs deviennent réels. L'agent lit vraiment Snowflake, détecte vraiment, journalise vraiment —
-et commence à se souvenir.
+Les stubs deviennent réels. L'agent lit vraiment Snowflake, détecte vraiment, journalise vraiment,
+et commence à se souvenir — **sans un seul nom de table écrit en dur**.
 
 ### Tâches
 - [ ] **Tools LangChain** (`@tool`), un par un, chacun testé isolément :
@@ -249,8 +269,11 @@ modeste et lucide vaut mieux qu'un détecteur ambitieux et faux.
 
 ---
 
-# Phase 5 — HITL complet : pause, reprise, Apply borné, Validate
+# Phase 5 — HITL complet : pause, reprise, Apply borné, Amend, Validate
 **Durée** : 1–2 sem · **Couvre** : O5, L6
+
+> **Révision 2026-07-28** : la décision humaine a **3 issues** (`approved` / `amend_contract` /
+> `rejected`), et un garde-fou structurel s'ajoute — **l'agent n'invente jamais une valeur** (P6).
 
 ### Objectif
 La boucle complète proposition → décision humaine → application → vérification, avec les garde-fous
@@ -261,22 +284,33 @@ structurels. C'est la deuxième jambe du projet (§2.2 du cahier) — et la part
       **impact estimé**, incidents similaires — puis `interrupt()`
 - [ ] File des propositions en attente : lisible hors du process (via le checkpointer + `INCIDENTS`),
       pour que Streamlit (phase 6) puisse les afficher
-- [ ] Reprise : injection de la décision (`approved` / `rejected` + identité du décideur + horodatage)
-      → le graphe repart exactement après `Propose`
+- [ ] Reprise : injection de la décision (`approved` / **`amend_contract`** / `rejected` + identité du
+      décideur + horodatage) → le graphe repart exactement après `Propose`
 - [ ] `Apply` réel et **borné** : transaction SQL ; la requête ne peut toucher que la table diagnostiquée ;
       mots-clés destructeurs (`DROP`, `TRUNCATE`, `DELETE` sans `WHERE`…) rejetés **même après approbation**
+- [ ] **Garde-fou « ne jamais inventer une valeur »** ⬅️ *nouveau (2026-07-28)* : `Apply` rejette toute
+      substitution de valeur devinée, **même après approbation**, au même titre que les mots-clés
+      destructeurs. Corrections autorisées : isoler en quarantaine · mettre à NULL + marquer · exclure
+      d'un agrégat Gold — la valeur brute reste intacte en Bronze pour audit.
+- [ ] `Amend` réel ⬅️ *nouveau* : écrit `contracts/<table>.v2.yaml` + journalise le diff de clause ;
+      **n'écrit rien dans les données**
 - [ ] `Validate` réel : re-profilage de la table, comparaison de la métrique anormale avant/après ;
       échec → `validation_status = "failed_manual_review"` (pas de re-tentative automatique)
 - [ ] Log enrichi : décision, décideur, horodatage, statut de validation, durée totale
 
 ### Definition of Done
-- **Les 3 tests de preuve passent** (ce sont des livrables, pas de l'hygiène) :
-  1. aucun chemin d'exécution n'atteint `Apply` sans `human_decision == "approved"` ;
-  2. une exécution se met en pause sur `interrupt` et reprend correctement après décision ;
-  3. `Apply` rejette toute requête hors table diagnostiquée ou contenant un mot-clé destructeur.
-- Le scénario complet (détection → proposition → approbation CLI → application → validation → journal)
-  se déroule de bout en bout sur le cas `sao paulo`/`são paulo`.
-- Un refus produit un incident journalisé **sans aucune écriture** sur les données.
+- **Les 5 tests de preuve passent** (ce sont des livrables, pas de l'hygiène) :
+  1. **P3** — aucun chemin d'exécution n'atteint `Apply` sans `human_decision == "approved"`, et la
+     branche `amend_contract` n'y mène pas ;
+  2. **P4** — une proposition qui substitue une valeur devinée est rejetée par `Apply` même approuvée ;
+  3. une exécution se met en pause sur `interrupt` et reprend correctement après décision ;
+  4. `Apply` rejette toute requête hors table diagnostiquée ou contenant un mot-clé destructeur ;
+  5. après `amend_contract`, **aucune ligne de données n'a bougé** (comptage avant/après) — seul le
+     fichier de contrat change de version.
+- Les **trois** scénarios bout en bout se déroulent : approbation (sur le cas `sao paulo`/`são paulo`),
+  refus, amendement.
+- Un refus produit un incident journalisé **sans aucune écriture** sur les données, et la même signature
+  n'est plus resoumise au run suivant.
 
 ### Pourquoi ici
 À la fin de cette phase tu as O1→O5 + O7 : le cœur complet. Il ne manque que l'interface (phase 6)

@@ -89,9 +89,9 @@ graph TB
         INC[("INCIDENTS<br/>mémoire + journal de l'agent")]
     end
 
-    AG["🤖 AGENT QUALITÉ (LangGraph)<br/>Profile ► Detect ► Diagnose ► Propose ⏸ ► Apply ► Validate ► Log"]
+    AG["🤖 AGENT QUALITÉ (LangGraph) — 8 nœuds<br/>Profile ► Detect ► Diagnose ► Propose ⏸ ► Apply ► Validate ► Log<br/>(ou ► Amend, quand c'est la règle qui a vieilli)"]
 
-    UI["🖥️ STREAMLIT<br/>dashboard BI · historique incidents · validation ✅/❌"]
+    UI["🖥️ STREAMLIT<br/>dashboard BI · historique incidents<br/>validation ✅ approuver / 📝 amender / ❌ refuser"]
 
     GEN --> T1
     T2 & T4 & T6 -.->|invoquent| AG
@@ -101,7 +101,8 @@ graph TB
     INC --> UI
 ```
 
-Le graphe de l'agent — **toute correction exige une validation humaine** (aucune action autonome) :
+Le graphe de l'agent — **8 nœuds**, et **toute correction exige une validation humaine** (aucune action
+autonome) :
 
 ```mermaid
 graph LR
@@ -110,17 +111,28 @@ graph LR
     D -->|"rien d'anormal"| L[Log]
     D -->|anomalie| DG["Diagnose<br/>(LLM + lineage dbt<br/>+ incidents passés)"]
     DG --> PR["Propose<br/>⏸ attente validation<br/>humaine (Streamlit)"]
-    PR -->|"✅ approuvé"| AP[Apply]
-    PR -->|"❌ refusé"| L
+    PR -->|"✅ approved<br/>la donnée est fausse"| AP[Apply]
+    PR -->|"📝 amend_contract<br/>la règle a vieilli"| AM["Amend<br/>contrat v1 → v2<br/>(aucune écriture<br/>sur les données)"]
+    PR -->|"❌ rejected"| L
     AP --> V[Validate]
+    AM --> L
     V -->|"échec → traitement manuel"| L
     V -->|succès| L
     L --> END([END])
 ```
 
-**Propriétés clés** : le **graphe** contrôle le flux ; le **LLM n'est appelé que dans `Diagnose`**, sur
-des **statistiques agrégées et métadonnées** — jamais sur les lignes brutes ; et **`Apply` est
-inatteignable sans approbation humaine** — structurellement.
+**Propriétés clés** — toutes **structurelles**, pas déclaratives :
+
+- le **graphe** contrôle le flux ; le **LLM n'est appelé que dans `Diagnose`**, sur des **statistiques
+  agrégées et métadonnées** — jamais sur les lignes brutes ;
+- **`Apply` est inatteignable sans approbation humaine** — une seule arête y entre, et `Amend` n'y mène
+  pas : amender une règle ne donne aucun droit d'écriture sur les données ;
+- **`Log` est la sortie unique** — aucun run ne peut se terminer sans laisser de trace ;
+- **l'agent n'invente jamais une valeur** : il isole, met à NULL, exclut d'un agrégat — il ne devine
+  pas (`8000` → `80`). Une substitution devinée est rejetée par `Apply` *même après approbation*.
+
+L'agent est **générique** : aucun nom de table ni de colonne n'est écrit en dur. Brancher un nouveau
+dataset = écrire un `datasets/<nom>.yaml`, sans toucher au code.
 
 Détail complet : [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -260,13 +272,15 @@ docs/
 
 ## Avancement
 
+Le détail étape par étape est dans [`PROGRESS.md`](PROGRESS.md) — ce tableau n'en est que le résumé.
+
 | Phase | Contenu | Statut |
 |-------|---------|--------|
-| 0 | Fondations & accès | 🚧 en cours |
-| 1 | Dataset hybride : Olist rejoué + anomalies injectées | ⬜ |
-| 2 | Pipeline Medallion sans agent (baseline) | ⬜ |
-| 3 | Squelette agent LangGraph (7 nœuds, pause/reprise) | ⬜ |
-| 4 | Agent branché au pipeline + `INCIDENTS` (mémoire) | ⬜ |
+| 0 | Fondations & accès | ✅ 2026-07-21 |
+| 1 | Dataset hybride : Olist rejoué + anomalies injectées | ✅ 2026-07-21 |
+| 2 | Pipeline Medallion sans agent (baseline) | ✅ 2026-07-27 — 92 runs Airflow verts, baseline figée |
+| 3 | Squelette agent LangGraph (8 nœuds, pause/reprise) | 🚧 en cours |
+| 4 | Socle générique + agent réel + `INCIDENTS` (mémoire) | ⬜ |
 | 5 | HITL complet : `interrupt`, reprise, `Apply` borné | ⬜ |
 | 6 | Observabilité Streamlit | ⬜ |
 | 7 | 🌟 Cause racine (lineage) + extensions (RAG, GitHub/MCP, CI, streaming) | ⬜ |

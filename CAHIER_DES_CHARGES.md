@@ -20,13 +20,31 @@ déplace mémoire vectorielle / journalisation GitHub / streaming en extensions.
 |-------------|---------|--------|
 | **HITL pur : toute correction exige une validation humaine** | Décision projet 2026-07-20 | Suppression du triplet confiance × risque × environnement, de la matrice de décision et des branches `Act` (auto) / `Escalate` |
 | **Suppression de la policy-as-code** (`governance/policy.yaml`) | Conséquence du HITL pur | Plus de seuils de routage à calibrer ; la garantie est **structurelle** (topologie du graphe), pas déclarative |
-| **Graphe réduit à 7 nœuds** | Simplification | `Recall` et `TraceRootCause` fusionnés dans `Diagnose` ; un seul point de pause : `Propose` |
+| **Graphe réduit à 7 nœuds** | Simplification | `Recall` et `TraceRootCause` fusionnés dans `Diagnose` ; un seul point de pause : `Propose` *(porté à 8 nœuds par la révision du 2026-07-28, voir §0bis)* |
 | **Suppression de la boucle de retry** | Simplification | Échec de validation → incident marqué « à traiter manuellement », pas de re-diagnostic automatique |
 | **Table `INCIDENTS` (Snowflake) = mémoire + journal** | Simplification | La mémoire du noyau est du SQL (mêmes table / type d'anomalie) ; le RAG vectoriel (Chroma) devient une **extension** |
 | **Journalisation GitHub (MCP) → extension** | Recentrage | Le journal auditable du noyau est la table `INCIDENTS`, consultable dans Streamlit |
 | **Streaming (Kafka/Redpanda) → extension** | Décision projet | Le batch quotidien d'abord ; le streaming n'arrive que si le temps le permet |
 | **Source de données = hybride : dataset réel Olist rejoué + injection contrôlée** | Décision projet 2026-07-20 | Pas de génération Faker ; le fil rouge sémantique (`sao paulo`/`são paulo`) est réel ; `ground_truth.yaml` conservé pour le benchmark (ADR 009) |
 | Rappel v3 conservé : Airflow, Snowflake, dbt tests seuls, LLM gratuit (Groq/Cortex) | HG6/HG10/HG11/HG12 | Inchangé |
+
+## 0bis. Révision du 2026-07-28 — l'agent doit être générique
+
+Constat : tel que spécifié en v4, l'agent aurait été **cousu main pour Olist**. Or un agent qualité qui
+ne fonctionne que sur un dataset n'est pas un agent qualité, c'est un script. Olist redevient donc un
+**cas de test** parmi d'autres, et cinq décisions en découlent — elles ne remplacent rien de la v4,
+elles s'y ajoutent.
+
+| Décision | Origine | Impact |
+|----------|---------|--------|
+| **Deux cycles au lieu d'un** | Généricité | Un cycle *Découverte* (hors DAG, une fois par table) qui introspecte, profile une fenêtre de référence et propose un **contrat YAML** validé par l'humain ; le cycle *Surveillance* reste le graphe, à chaque batch |
+| **Zéro nom de table ou de colonne en dur** | Généricité | Tout vient d'`INFORMATION_SCHEMA` et du contrat. La détection sémantique s'applique à *toute* colonne classée catégorielle : `são paulo` est attrapé par généricité, pas par cas particulier |
+| **Le contrat versionné devient le 3ᵉ pilier de détection** | Généricité | À côté du z-score et des dbt tests. Construit sur une **période de référence propre** (avant la 1ʳᵉ anomalie injectée), sinon il apprend les anomalies comme normales |
+| **Graphe porté à 8 nœuds, `Propose` a 3 issues** | Conséquence du contrat | Ajout du nœud `Amend` : `approved` → `Apply`, `amend_contract` → `Amend` (le contrat avait tort, pas la donnée), `rejected` → `Log`. C'est le mécanisme anti-obsolescence du contrat |
+| **L'agent n'invente jamais une valeur** | Garde-fou | Il peut isoler, mettre à NULL, exclure d'un agrégat — jamais deviner (8000 → 80). **Au même rang que le HITL** : c'est le garde-fou n°6 du §5.4 |
+
+Ce qui reste spécifique à Olist : `ground_truth.yaml`, qui est le **benchmark**, pas l'agent. Changer de
+dataset = écrire un nouveau `datasets/<nom>.yaml` et refaire le benchmark, sans toucher au code.
 
 ---
 
@@ -122,9 +140,10 @@ Snowflake (stockage / requêtage · + table INCIDENTS)
 
    ↕ à chaque couche, Airflow déclenche la tâche « agent qualité » :
    ┌──────────────────────────────────────────────────────────────┐
-   │ Agent IA (LangGraph) — 7 nœuds                                │
+   │ Agent IA (LangGraph) — 8 nœuds                                │
    │  Profile ► Detect ► Diagnose(LLM) ► Propose ⏸ ► Apply         │
-   │  ► Validate ► Log                                             │
+   │  ► Validate ► Log      └─ ou ► Amend (corrige le contrat)     │
+   │  Contrats : contracts/<table>.vN.yaml (cycle Découverte)      │
    │  Mémoire & journal : table INCIDENTS (Snowflake)              │
    │  Validation humaine & observabilité : Streamlit               │
    └──────────────────────────────────────────────────────────────┘
@@ -147,22 +166,50 @@ Le LLM raisonne sur des **statistiques agrégées et métadonnées**, **jamais**
 
 ### 5.2 État partagé (`AgentState`)
 
+Implémenté dans [`agent/state.py`](agent/state.py) — c'est ce fichier qui fait foi, la spécification
+ci-dessous en est le reflet commenté.
+
 ```python
 class AgentState(TypedDict):
-    layer: str                        # bronze | silver | gold (contexte Airflow)
+    # Entrée : fourni par l'appelant (Airflow)
+    dataset: str                      # nom du registre datasets/<dataset>.yaml
+    layer: str                        # bronze | silver | gold
     table: str
     batch_id: str
-    profile: dict                     # ← Profile
+    # Références : ce à quoi on compare
+    contract: dict                    # contracts/<table>.yaml — « ce qui devrait être vrai »
+    contract_version: Optional[str]   # ex. "v1" ; None si la table n'a pas encore de contrat
     schema_history: list
+    profile: dict                     # ← Profile — agrégats seulement, jamais de lignes brutes
     anomalies: list                   # ← Detect
     past_incidents: list              # ← lus dans INCIDENTS (mémoire, O7)
     diagnosis: Optional[dict]         # ← Diagnose : root_cause, proposed_fix, explanation
-    human_decision: Optional[str]     # ← Propose : "approved" | "rejected" (HITL)
-    validation: Optional[dict]        # ← Validate : success | failed
+    # Propose : la pause HITL
+    human_decision: Optional[str]     # "approved" | "amend_contract" | "rejected"
+    decided_by: Optional[str]         # qui a tranché
+    decided_at: Optional[str]         # quand (ISO 8601)
+    # Apply : quelle correction a réellement tourné ?
+    fix_override: Optional[str]       # la correction réécrite par l'humain, si différente
+    applied_fix: Optional[str]        # celle qui a réellement tourné (proposée OU réécrite)
+    validation: Optional[dict]        # ← Validate : success | failed_manual_review
     logs: Annotated[list, add]        # audit trail append-only
 ```
 
+Deux champs méritent une justification, parce qu'ils ne sont pas évidents :
+
+- **`fix_override`** — l'humain peut approuver *sa propre* correction plutôt que celle de l'agent. Sans
+  cette possibilité il irait corriger à la main dans la base : la donnée serait juste, mais `INCIDENTS`
+  ne le saurait pas, et le journal deviendrait faux. C'est donc la **traçabilité** qui l'impose, pas le
+  confort. Le couple `fix_override` / `applied_fix` permet en outre de distinguer en phase 8 trois cas
+  très différents : l'agent a bien vu **et** bien proposé, il a bien vu mais mal proposé, il n'aurait
+  pas dû alerter.
+- **`logs: Annotated[list, add]`** — le seul champ qui s'accumule au lieu d'être écrasé. Le réducteur
+  `add` fait `ancien + nouveau` : chaque nœud ajoute sa ligne sans effacer celles des autres.
+
 ### 5.3 Graphe
+
+Câblé dans [`agent/graph.py`](agent/graph.py). **8 nœuds**, **2 arêtes conditionnelles**, `Propose` a
+**3 issues** (révision du 2026-07-28, §0bis).
 
 ```
 START
@@ -173,10 +220,17 @@ START
                  │
                  ▼
               Propose ⏸ interrupt — attente de la décision humaine (Streamlit)
-                 │                         │
-             (approuvé)                (refusé)
-                 ▼                         │
-              Apply ──► Validate ──────────┴──► Log → END
+                 │
+        ┌────────┼──────────────────┐
+   (approved)  (amend_contract)  (rejected)
+        │        │                  │
+        ▼        ▼                  │
+      Apply    Amend                │
+        │        │                  │
+        ▼        │                  │
+    Validate     │                  │
+        │        │                  │
+        └────────┴──────────────────┴──► Log → END
                           (succès, ou échec marqué « à traiter manuellement »)
 ```
 
@@ -185,6 +239,20 @@ START
   injecte dans le contexte.
 - **`Propose`** est le **seul point de sortie** de `Diagnose` : structurellement, aucune correction ne
   peut être appliquée sans passer par la pause de validation.
+- **`Amend`** ⬅️ *nouveau* — le miroir d'`Apply`. Il traite le cas où **la donnée est juste et c'est la
+  règle qui a vieilli** : un nouveau moyen de paiement apparaît, une borne métier a bougé.
+
+      Apply  →  la donnée est fausse  →  écrit dans les DONNÉES
+      Amend  →  la règle est fausse   →  écrit dans le CONTRAT (v1 → v2)
+
+  Sans cette branche, un contrat figé finit par crier à chaque évolution normale du métier, l'équipe
+  s'habitue à ignorer les alertes, et l'agent meurt. **`Amend` ne mène jamais à `Apply`** : amender une
+  règle ne donne aucun droit d'écriture sur les données — c'est le test de preuve P3 qui le vérifie.
+- **Les deux « non » ne sont pas le même non** : *« c'est normal et ça le restera »* → `amend_contract`
+  (permanent, change la règle) · *« exceptionnel, rien à changer »* → `rejected` (silence par signature,
+  la règle est conservée). Les confondre ferait vieillir le contrat ou rendrait l'agent bavard.
+- **`Log` est la sortie unique** : aucun run ne peut se terminer sans laisser de trace. C'est
+  topologique — `Log` est le seul nœud relié à END — et c'est prouvé par test.
 - **Pas de boucle de retry** : si `Validate` constate que la correction n'a pas eu l'effet attendu,
   l'incident est marqué « échec — à traiter manuellement » et journalisé. L'humain reprend la main.
 
@@ -193,13 +261,33 @@ START
 Ils sont **structurels** (dans le code et la topologie du graphe), pas configurables :
 
 1. **Aucun chemin `Diagnose → Apply`** : la seule arête entrante d'`Apply` vient de `Propose` avec
-   `human_decision == "approved"`. Prouvé par test.
+   `human_decision == "approved"`. La branche `amend_contract` **n'y mène pas non plus**. Prouvé par
+   test (P3).
 2. **`Apply` est borné** : transaction SQL, table diagnostiquée uniquement, mots-clés destructeurs
    (`DROP`, `TRUNCATE`, autre table) rejetés — même après approbation humaine.
 3. **`Validate` systématique** : re-profilage après application ; on ne croit jamais une correction sur parole.
 4. **Journalisation totale** : chaque run écrit une ligne dans `INCIDENTS`, y compris « rien d'anormal »
    et « refusé ». Le journal est append-only.
 5. **LLM confiné** : un seul nœud l'appelle (`Diagnose`), sur agrégats et métadonnées uniquement.
+6. **L'agent n'invente jamais une valeur** ⬅️ *nouveau (2026-07-28)*. Face à une valeur hors bornes —
+   `8000` dans une colonne à [1–100] — l'agent **ne peut pas savoir** s'il s'agit de 80,00 € saisis en
+   centimes, d'une faute de frappe ou d'une vraie grosse commande. Proposer « remplacer 8000 par 80 »,
+   c'est **fabriquer de la donnée qui n'a jamais existé**.
+
+   | | Autorisé |
+   |---|---|
+   | isoler en quarantaine | ✅ |
+   | mettre à NULL + marquer | ✅ |
+   | exclure d'un agrégat Gold (la valeur brute reste intacte en Bronze pour audit) | ✅ |
+   | **substituer une valeur devinée** | ❌ rejeté par `Apply` **même après approbation humaine** |
+
+   Proposition par défaut sur un outlier : *isoler + exclure de l'agrégat*, jamais *remplacer*. Prouvé
+   par test (P4).
+
+   Nuance assumée : cette règle contraint l'**agent**, pas l'humain. L'agent ne peut pas savoir si
+   `8000` valait `80` ; l'humain, lui, peut avoir appelé le fournisseur. Il a l'autorité pour affirmer
+   une valeur (via `fix_override`), l'agent ne l'a pas. Les garde-fous 2 et 3 restent actifs dans les
+   deux cas : ils protègent contre l'accident, pas contre le jugement.
 
 ### 5.5 La table `INCIDENTS`
 
@@ -307,7 +395,7 @@ Toute la démo tourne autour d'**un incident** :
 | # | Livrable |
 |---|----------|
 | L1 | Pipeline fonctionnel (code, couches Bronze/Silver/Gold, modèles dbt) |
-| L2 | Agent LangGraph (graphe 7 nœuds, tools, mémoire, cause racine) |
+| L2 | Agent LangGraph (graphe 8 nœuds, socle générique + contrats, tools, mémoire, cause racine) |
 | L3 | Interface Streamlit (observabilité + validation HITL) |
 | L4 | Jeu de données de test avec anomalies injectées (`ground_truth.yaml`) |
 | L5 | Rapport de benchmark chiffré (dont gain MTTR & mémoire) |
@@ -326,7 +414,7 @@ Toute la démo tourne autour d'**un incident** :
 | 0 | Cadrage, choix techniques, environnement (Snowflake/Airflow/dbt) | 3–5 j |
 | 1 | Jeu de données + anomalies injectées (`ground_truth.yaml`) | 1 sem |
 | 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem |
-| 3 | Squelette agent LangGraph (7 nœuds, stubs, checkpointer) | 1–2 sem |
+| 3 | Squelette agent LangGraph (8 nœuds, stubs, checkpointer) | 1–2 sem |
 | 4 | Agent branché au pipeline (détection réelle, `INCIDENTS`, règles) | 2 sem |
 | 5 | HITL complet : `interrupt`, reprise, `Apply` borné, `Validate` | 1–2 sem |
 | 6 | Observabilité Streamlit (BI, incidents, validation) | 1–2 sem |

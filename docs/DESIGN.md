@@ -89,7 +89,7 @@ un garde-fou écrit dans la structure du graphe est une **garantie**. Sur un suj
 « l'agent propose, l'humain décide », c'est structurant.
 
 **D'où P1** : *le graphe contrôle le flux, le LLM ne fait que raisonner*. Un seul node appelle le LLM
-(`Diagnose`). Les six autres sont du code déterministe, testables sans mock.
+(`Diagnose`). Les sept autres sont du code déterministe, testables sans mock.
 
 **Le prix payé** — à assumer : l'agent est **moins souple**. Il ne saura pas gérer une classe d'anomalies
 pour laquelle aucun chemin n'existe dans le graphe. C'est un choix : on échange de la généralité contre
@@ -188,7 +188,7 @@ cause connue et la correction écrite. Automatiser l'exécution optimisait la ma
 | | HITL pur (v4) | Scoring d'autonomie (v3) |
 |---|---|---|
 | Garantie | Structurelle (topologie du graphe) | Configurée (policy.yaml) |
-| Complexité | 7 nœuds, zéro seuil à calibrer | 13 nœuds, 2 scores, 5 lignes de matrice |
+| Complexité | 8 nœuds, zéro seuil de **décision** à calibrer | 13 nœuds, 2 scores, 5 lignes de matrice |
 | Latence de correction | Attend un humain, toujours | Immédiate dans les cas sûrs (DEV/TEST) |
 | Risque résiduel | Le « rubber-stamping » humain | Un score mal calibré qui auto-applique à tort |
 

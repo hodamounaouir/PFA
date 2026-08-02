@@ -11,6 +11,27 @@ rejoué jour par jour + **injection contrôlée** d'anomalies documentées dans 
 On ne génère pas de données ; on rejoue des données réelles et on en corrompt certaines, à des dates
 choisies, de façon documentée.
 
+**Décision agent générique (2026-07-28)** : l'agent doit fonctionner sur **n'importe quel dataset**,
+Olist n'étant qu'un cas de test. Cinq conséquences structurantes, détaillées dans les phases 3 à 5 :
+
+1. **Deux cycles au lieu d'un.** Un cycle *Découverte* (hors DAG, une fois par table) qui introspecte,
+   profile une fenêtre de référence, classe chaque colonne par **rôle inféré** et propose un **contrat
+   YAML versionné** validé par l'humain. Un cycle *Surveillance* (le graphe LangGraph, à chaque batch).
+2. **Zéro nom de table ou de colonne en dur.** Tout vient d'`INFORMATION_SCHEMA` et du contrat. La
+   détection sémantique s'applique à *toute* colonne classée catégorielle — São Paulo est attrapé par
+   généricité, pas par cas particulier.
+3. **Le contrat devient le 3ᵉ pilier de détection**, à côté du z-score et des dbt tests. Il est
+   **versionné** (jamais figé) et construit sur une **période de référence propre (J1→J44)**, sinon il
+   apprend les anomalies injectées comme normales.
+4. **Le graphe passe à 8 nœuds** : `Propose` a trois issues — `approved` → `Apply`, `amend_contract` →
+   `Amend` (le contrat avait tort, pas la donnée), `rejected` → `Log`. C'est le mécanisme
+   anti-obsolescence du contrat.
+5. **Nouveau garde-fou structurel : l'agent n'invente jamais une valeur.** Il peut isoler, mettre à
+   NULL, exclure d'un agrégat — jamais deviner (8000 → 80). Au même rang que le HITL.
+
+**Ce qui reste spécifique à Olist** : `ground_truth.yaml` — c'est le **benchmark**, pas l'agent.
+Changer de dataset = écrire un nouveau `datasets/<nom>.yaml` et refaire le benchmark, sans toucher au code.
+
 ---
 
 ## Tableau de bord
@@ -19,9 +40,9 @@ choisies, de façon documentée.
 |:-:|-------|:-:|:-:|
 | 0 | Fondations & accès | 3–5 j | ✅ terminé le 2026-07-21 |
 | 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ✅ terminé le 2026-07-21 |
-| 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | 🚧 en cours (2.1 ✅) |
-| 3 | Squelette agent LangGraph (7 nœuds) | 1–2 sem | ⬜ |
-| 4 | Agent réel + table `INCIDENTS` | 2 sem | ⬜ |
+| 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | ✅ terminé le 2026-07-27 |
+| 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | ⬜ ⬅️ **prochaine** |
+| 4 | Socle générique + agent réel + `INCIDENTS` | 3 sem | ⬜ |
 | 5 | HITL complet : pause, reprise, Apply borné | 1–2 sem | ⬜ |
 | 6 | Observabilité & validation Streamlit | 1–2 sem | ⬜ |
 | 7 | 🌟 Cause racine (lineage) + extensions | 1–2 sem | ⬜ |
@@ -176,7 +197,7 @@ C'est aussi la **baseline du benchmark** — à figer.
   déjà ASCII chez Olist) → mart dédié `fct_geolocation_by_city` ajouté comme démonstrateur.
 - Dépendance ajoutée : `dbt-snowflake`
 
-### 2.3 Orchestration Airflow 🚧 (fichiers créés 2026-07-24 — exécution à faire sur le PC)
+### 2.3 Orchestration Airflow ✅ (fichiers 2026-07-24 — backfill exécuté sur le PC 2026-07-27)
 > Airflow ne tourne pas sur le serveur (pas de Docker) : les fichiers sont écrits ici et
 > versionnés ; le DAG s'exécute **sur le PC** (Windows + Docker Desktop). Cf. `airflow/README.md`.
 - [x] Airflow en local (Docker Compose) — `airflow/Dockerfile` (image + venv **isolé** du pipeline)
@@ -186,35 +207,91 @@ C'est aussi la **baseline du benchmark** — à figer.
       `@daily`, `catchup=True`. Tests dbt tolérants : rc=1 (détections) = vert, rc=2 (erreur dbt) = rouge.
 - [x] Archivage `benchmarks/archive_baseline.py` → `benchmarks/baseline_run.json` (une entrée/jour,
       confrontée à `ground_truth.yaml`). Ajout `--if-scheduled` à `data/inject.py` (additif, tests OK).
-- [ ] **À FAIRE sur le PC** : `docker compose build` + `up`, puis backfill des ~30 premiers jours
-      (jours propres, DAG 100 % vert) puis le reste de la fenêtre ; vérifier RAW/STAGING/MARTS peuplés
-      et `baseline_run.json` rempli (détections aux J45/J60/J75/J80/J85, cas São Paulo raté).
+- [x] **Exécuté sur le PC** (2026-07-27) : `docker compose build` + `up`, DAG dépausé avec
+      `catchup=True` / `max_active_runs=1` → **92 runs séquentiels verts** sur toute la fenêtre.
+      RAW/STAGING/MARTS peuplés et interrogeables ; `benchmarks/baseline_run.json` archivé
+      (**92 entrées**, commit `8ffd7a1`) — c'est la colonne « baseline » du tableau de la phase 8.
 
-**☑ Phase terminée quand** : le DAG est vert de bout en bout sur la fenêtre rejouée ; les 3 couches sont
-peuplées et interrogeables ; la baseline rate le cas sémantique (prouvé) ; `baseline_run.json` est archivé.
+**☑ Phase terminée quand** : ~~le DAG est vert de bout en bout sur la fenêtre rejouée ; les 3 couches sont
+peuplées et interrogeables ; la baseline rate le cas sémantique (prouvé) ; `baseline_run.json` est archivé.~~
+✅ **Les 4 critères sont remplis (2026-07-27).** La baseline est figée : à partir d'ici, on ne la modifie
+plus — c'est le point de comparaison de tout le reste du projet.
 
 ---
 
-# Phase 3 — Squelette agent LangGraph (7 nœuds)
+# Phase 3 — Squelette agent LangGraph (8 nœuds)
 
 **Objectif** : le graphe tourne de START à END avec des stubs ; la mécanique **pause/reprise** est validée.
 On teste la tuyauterie, pas l'intelligence.
 
+> **Révision 2026-07-28** : 8 nœuds au lieu de 7, et `propose` a **3 issues** au lieu de 2 (ajout de
+> `amend_contract` → nœud `amend`). Le reste de la phase est inchangé : les nœuds sont des stubs, donc
+> la généricité décidée le 2026-07-28 ne coûte rien ici — elle se paie en phase 4.
+
+```
+START
+  │
+  ▼
+profile ──► detect ──(rien d'anormal)──────────────────────────► log ──► END
+               │ (anomalies)
+               ▼
+           diagnose                    ← seul nœud qui appelle le LLM
+               │
+               ▼
+           propose  ⏸ interrupt — décision humaine
+               │
+      ┌────────┼──────────────────┐
+ (approved)  (amend_contract)  (rejected)
+      │        │                  │
+      ▼        ▼                  │
+    apply    amend                │
+      │        │                  │
+      ▼        │                  │
+  validate     │                  │
+      │        │                  │
+      └────────┴──────────────────┴──► log ──► END
+```
+
+`log` est la **sortie unique** : aucun run ne peut se terminer sans laisser de trace. C'est structurel,
+au même titre que « aucun chemin n'atteint `apply` sans approbation » — et ça se prouve par test.
+
+### 3.0 Tracer la décision avant de coder
+- [ ] `docs/adr/010-agent-generique.md` : les 5 décisions du 2026-07-28 (deux cycles · zéro nom en dur ·
+      contrat versionné comme 3ᵉ pilier · 8 nœuds / 3 issues · ne jamais inventer une valeur), avec les
+      alternatives écartées — dont « découverte une seule fois puis contrat figé », rejetée pour cause
+      d'obsolescence du contrat et de piège descriptif ↔ normatif
+- [x] Mettre `README.md`, `ROADMAP.md`, `CAHIER_DES_CHARGES.md` (§5.2/5.3/5.4) et `docs/ARCHITECTURE.md`
+      en cohérence : ~~ils décrivent encore un graphe à **7 nœuds** et 2 issues~~
+      *(fait : les 4 fichiers prévus + `docs/DESIGN.md` et `CONTRIBUTING.md`, qui portaient les mêmes
+      chiffres. Ajouts : §0bis du cahier (les 5 décisions du 2026-07-28), invariant **P6** « ne jamais
+      inventer une valeur » dans ARCHITECTURE (5 → 6 invariants), règle **R7** dans CONTRIBUTING
+      (6 → 7 règles), §5.2 du cahier et §5.1 d'ARCHITECTURE réalignés sur `agent/state.py` réel.
+      Le tableau d'avancement du README, resté bloqué à « phase 0 en cours », est resynchronisé.)*
+
 ### 3.1 Le graphe
-- [ ] `agent/state.py` : `AgentState` (TypedDict) — copier §5.2 du cahier, dont `logs: Annotated[list, add]`
-- [ ] `agent/nodes/` : les 7 nœuds en stub (valeurs en dur) : `profile`, `detect`, `diagnose`,
-      `propose`, `apply`, `validate`, `log`
-- [ ] `agent/graph.py` : assemblage + les **2 conditional edges** :
-      `detect → (diagnose | log)` et `propose → (apply | log)`
+- [ ] `agent/state.py` : `AgentState` (TypedDict) — base §5.2 du cahier, dont `logs: Annotated[list, add]`.
+      **Champs ajoutés le 2026-07-28** : `dataset` (nom du registre), `contract` (le contrat chargé),
+      `contract_version`, et `human_decision` qui accepte désormais `approved | rejected | amend_contract`
+- [ ] `agent/nodes/` : les **8 nœuds en stub** (valeurs en dur) : `profile`, `detect`, `diagnose`,
+      `propose`, `apply`, **`amend`**, `validate`, `log`
+- [x] `agent/graph.py` : assemblage + les **2 conditional edges** :
+      `detect → (diagnose | log)` et `propose → (apply | amend | log)` ⬅️ *3 branches*
+      *(fait : `build_graph()` / `build_agent(checkpointer=None)` ; aiguillages `route_after_detect` et
+      `route_after_propose`, tous deux avec un `path_map` explicite — un nom hors liste fait échouer le
+      run au lieu de router au hasard. Défaut de `route_after_propose` = `log`, jamais `apply` : `None`,
+      `rejected` et toute valeur inattendue retombent sur le journal. Les 4 chemins tournent de bout en
+      bout)*
 - [ ] Export PNG du graphe (`draw_mermaid_png()`) → `docs/img/agent_graph.png` (README + soutenance)
 
 ### 3.2 Pause & reprise (le mécanisme critique)
 - [ ] Checkpointer `SqliteSaver` branché à la compilation
 - [ ] `propose` appelle `interrupt()` avec la proposition (stub) comme payload
-- [ ] Script CLI `scripts/decide.py <thread_id> approve|reject` : injecte la décision
+- [ ] Script CLI `scripts/decide.py <thread_id> approve|reject|amend` : injecte la décision
       (`Command(resume=...)`) → le graphe reprend
 - [ ] **Test clé** : lancer un run → interruption → **tuer le process** → relancer → la décision reprend
       le graphe exactement après `propose`
+- [ ] Note de conception : **un seul mécanisme d'interruption, trois usages** (corriger / amender /
+      refuser) — et il resservira tel quel pour la validation des contrats en phase 4
 
 ### 3.3 Premier vrai appel LLM
 - [ ] `diagnose` : appel Groq réel + `PydanticOutputParser` → sortie forcée
@@ -223,64 +300,156 @@ On teste la tuyauterie, pas l'intelligence.
       « à traiter manuellement » (pas d'exception qui tue le graphe)
 
 ### 3.4 Tests
-- [ ] Les 3 chemins du graphe (rien d'anormal / refusé / approuvé) — 3 tests, LLM mocké
+- [ ] Les **4 chemins** du graphe — 4 tests, LLM mocké :
+      rien d'anormal / refusé / **amendé** / approuvé
 - [ ] **Test de preuve P3** : instrumenter `apply` → prouver qu'aucune exécution ne l'atteint sans
-      `human_decision == "approved"` (parcours exhaustif des chemins)
+      `human_decision == "approved"` (parcours exhaustif — la branche `amend` ne doit **pas** y mener)
+- [ ] **Test de sortie unique** : les 4 chemins passent tous par `log` avant `END`
 - [ ] Test pause/reprise après redémarrage du process
 
-**☑ Phase terminée quand** : les 3 chemins passent en test ; la reprise post-redémarrage marche ; le test
-de preuve P3 passe ; le PNG du graphe est généré.
+**☑ Phase terminée quand** : les 4 chemins passent en test ; la reprise post-redémarrage marche ; les
+tests de preuve P3 et « sortie unique » passent ; le PNG du graphe est généré.
 
 ---
 
-# Phase 4 — Agent réel + table `INCIDENTS`
+# Phase 4 — Socle générique + agent réel + table `INCIDENTS`
 
 **Objectif** : les stubs deviennent réels — l'agent lit vraiment Snowflake, détecte vraiment, journalise
-vraiment, et commence à se souvenir.
+vraiment, et commence à se souvenir. **Et il le fait sans un seul nom de table écrit en dur.**
+
+> **Révision 2026-07-28** : c'est ici que se paie la généricité. La phase gagne deux blocs (**4.0** socle
+> interchangeable, **4.2** cycle Découverte + contrats) et passe de 2 à ~3 semaines. Découpage conseillé :
+> **4a = 4.0 → 4.2** (le socle générique, testable sur Olist *et* sur un second dataset jouet) puis
+> **4b = 4.3 → 4.6** (la détection et la mémoire).
+
+```
+CYCLE A — DÉCOUVERTE  (hors DAG, une fois par table, puis à la demande)
+
+  connect ──► introspect ──► profile_ref ──► characterize ──► propose_contract ⏸ ──► save_contract
+                                                                      │                    │
+                                                              décision humaine     contracts/<table>.v1.yaml
+
+CYCLE B — SURVEILLANCE  (le graphe 8 nœuds de la phase 3, à chaque batch, dans Airflow)
+```
+
+### 4.0 Socle générique — ce qui rend l'agent interchangeable ⬅️ *nouveau*
+- [ ] `agent/connectors/base.py` : interface commune — `list_tables()`, `get_schema(table)`,
+      `profile(table, batch_filter)`. **Aucun SQL Snowflake au-dessus de cette couche.**
+- [ ] `agent/connectors/snowflake.py` : la première implémentation (les autres viendront : Postgres,
+      REST/FastAPI de l'objectif O1, CSV)
+- [ ] `datasets/olist.yaml` : le **registre** — connecteur, tables à surveiller, `batch_column`, couche.
+      C'est le seul fichier à écrire pour brancher un nouveau dataset :
+      ```yaml
+      name: olist
+      connector: snowflake
+      tables:
+        - {name: RAW.ORDERS, layer: bronze, batch_column: _batch_id}
+      ```
+- [ ] Test de généricité : le socle tourne sur un **second dataset jouet** (quelques CSV sans rapport
+      avec Olist) sans modifier une ligne de code — juste un nouveau YAML de registre
+- [ ] Ce qui reste **déclaré** et non inférable, à documenter honnêtement : la colonne de batch, les
+      tables à surveiller, les règles métier (injectées par l'humain à la validation du contrat)
 
 ### 4.1 Les tools (un par un, testés isolément)
-- [ ] `profile_table` : volumes, taux de nulls par colonne, cardinalités, min/max/moyenne, top-K valeurs,
-      fraîcheur — en SQL agrégé uniquement
+- [ ] `profile_table` : volumes, taux de nulls par colonne, cardinalités, **min/max**, moyenne, écart-type,
+      top-K valeurs, fraîcheur — en SQL agrégé uniquement, via le connecteur
+      *(⚠️ min/max sont indispensables : une seule ligne aberrante — 8000 dans une colonne à [1–100] —
+      ne déplace presque pas la moyenne mais fait exploser le max)*
 - [ ] `read_schema_history` : lit `OPS._SCHEMA_HISTORY`
 - [ ] `run_sql` : **lecture seule** — rejet par liste de mots-clés d'écriture + journalisation de chaque requête
 - [ ] `generate_dq_rule` : produit un dbt test YAML rattaché à une dimension DAMA
 - [ ] `write_log` : écrit dans `OPS.INCIDENTS`
 
-### 4.2 Profile & Detect réels
-- [ ] `profile` : appelle `profile_table` + **persiste le profil du jour** dans `OPS._PROFILES`
-- [ ] `detect` — quatre familles, toutes déterministes :
-  - [ ] dérive de **schéma** : diff du schéma du jour vs `_SCHEMA_HISTORY`
-  - [ ] dérive **statistique** : z-score du profil du jour vs moyenne/écart-type des N derniers jours
-        (`_PROFILES`) — volume, taux de nulls, cardinalité
-  - [ ] candidats **sémantiques** : normalisation (casse/accents/espaces) des top-K valeurs
-        catégorielles → clusters de collision (attrape `sao paulo` / `são paulo`)
-  - [ ] intégration des **échecs dbt test** du run comme anomalies déjà confirmées
-- [ ] Seuils de détection dans un petit fichier de config (`agent/config.py`) — ce sont des réglages de
-      détection, pas des règles de décision (la décision, c'est l'humain)
+### 4.2 Cycle Découverte : caractérisation & contrats ⬅️ *nouveau*
+- [ ] `agent/characterize/` : **classer chaque colonne par rôle inféré** — c'est le moteur de généricité
 
-### 4.3 La table `INCIDENTS` et la mémoire
+  | Rôle | Reconnu à | Contrôles qui en découlent |
+  |---|---|---|
+  | identifiant | cardinalité ≈ nb lignes, non-null | unicité, nulls, format |
+  | clé étrangère | valeurs ⊂ identifiants d'une autre table | intégrité référentielle, orphelins |
+  | catégoriel | texte, cardinalité faible | valeurs nouvelles/disparues, **collisions sémantiques**, distribution |
+  | numérique | type numérique, cardinalité élevée | bornes, moyenne/σ, outliers, négatifs/zéros |
+  | temporel | type date/timestamp | fraîcheur, dates futures, trous, monotonie |
+  | texte libre | texte, cardinalité élevée | nulls + longueurs **seulement** (surtout pas de valeurs acceptées) |
+
+- [ ] `scripts/discover.py <dataset>` : introspection → profilage de la **fenêtre de référence
+      J1→J44** (⚠️ *avant* la 1ʳᵉ injection, sinon le contrat apprend les anomalies comme normales) →
+      caractérisation → proposition de contrat
+- [ ] **Validation humaine du contrat** (même `interrupt()` qu'en 3.2) : les bornes proposées sont
+      *descriptives* (« observé entre 1 et 100 »), l'humain les rend *normatives* (« oui, 100 est une
+      vraie borne métier »). C'est le moment où le métier entre dans le système.
+- [ ] **Piège descriptif ↔ normatif** : la découverte doit *critiquer* ce qu'elle trouve, pas seulement
+      l'enregistrer. Elle fait tourner la détection de collisions **pendant** la découverte, sinon le
+      contrat grave `sao paulo` + `são paulo` comme deux valeurs légitimes et le cas d'école est perdu.
+      → clause attendue : `cardinalité_normalisée == cardinalité_brute`
+- [ ] `contracts/<table>.v1.yaml` **versionnés dans git** ; `agent/contracts/loader.py` les charge au runtime
+
+### 4.3 Profile & Detect réels
+- [ ] `profile` : appelle `profile_table` + **persiste le profil du jour** dans `OPS._PROFILES`
+      (ordre impératif : lire l'historique **avant** d'y écrire le profil du jour)
+- [ ] `detect` — **quatre familles**, toutes déterministes, toutes génériques :
+  - [ ] dérive de **schéma** : diff du schéma du jour vs `_SCHEMA_HISTORY` + contrat
+  - [ ] **violation de contrat** ⬅️ *nouveau* : confrontation aux clauses du YAML (bornes, unicité,
+        nulls interdits, valeurs acceptées, cohérence normalisée)
+  - [ ] dérive **statistique** : écart du profil du jour vs les N derniers jours (`_PROFILES`)
+  - [ ] **collisions sémantiques** : normalisation (casse/accents/espaces) des top-K valeurs de
+        **toute colonne classée catégorielle** → clusters de collision (attrape `sao paulo`/`são paulo`)
+  - [ ] intégration des **échecs dbt test** du run comme anomalies déjà confirmées
+- [ ] **Statistiques robustes** : médiane + MAD plutôt que moyenne + écart-type — sinon l'anomalie du J60
+      entre dans l'historique, gonfle σ, et la récidive du J85 paraît *moins* grave (contamination de
+      la référence). Plancher sur σ pour le cas « historique parfaitement constant » (0 % de nulls
+      → division par zéro).
+- [ ] **Démarrage à froid** : pas de détection statistique avant N jours d'historique (N ≈ 15–30).
+      Chez Olist c'est confortable : 1ʳᵉ injection au J45, donc 44 jours propres pour apprendre.
+- [ ] Seuils de détection dans `agent/config.py` — ce sont des réglages de **détection**, pas des règles
+      de décision (la décision, c'est l'humain)
+
+### 4.4 La table `INCIDENTS` et la mémoire (dans les deux sens)
 - [ ] DDL `OPS.INCIDENTS` (schéma §5.5 du cahier) — append-only
-- [ ] `log` réel : une ligne par run, **quel que soit le chemin** (y compris « rien d'anormal »)
-- [ ] Tool `read_past_incidents` : SQL sur `INCIDENTS` — filtre `human_decision IS NOT NULL` (R5),
-      match par table + type d'anomalie
+- [ ] `log` réel : une ligne par run, **quel que soit le chemin** (y compris « rien d'anormal » et
+      « refusé » — un faux positif est une **donnée de mesure** pour la précision en phase 8)
+- [ ] **Signature d'anomalie** ⬅️ *nouveau* — `(table, colonne, type, ordre de grandeur)`. C'est elle qui
+      définit ce que veut dire « la même anomalie ». Granularité critique : trop large = l'agent devient
+      aveugle (« plus jamais de nulls sur `customer_id` » le ferait taire même à 90 %).
+- [ ] Tool `read_past_incidents` : SQL sur `INCIDENTS`, filtre `human_decision IS NOT NULL` (R5),
+      match par signature. **La mémoire sert dans les deux sens** :
+  - [ ] `approved` → l'agent **retrouve la solution** : au J85 il cite l'incident du J60 et propose
+        la même correction (c'est l'objectif O7, mesuré T1 vs T2 en phase 8)
+  - [ ] `rejected` → l'agent **se tait** : filtre appliqué entre `detect` et `diagnose`, l'écart est
+        journalisé mais pas soumis. Il **reparle si l'ampleur change franchement** (30 % → 85 % de nulls
+        n'est plus la même signature).
+- [ ] Garde-fou anti-cécité : rien n'est supprimé, tout est en base — la liste des signatures en silence
+      est requêtable (et affichée en phase 6, réactivable d'un clic)
 - [ ] `diagnose` réel : prompt = profil + anomalies + métadonnées + incidents passés ; sortie parsée
       Pydantic ; garde-fou sur le SQL proposé (table concernée uniquement, pas de mot-clé destructeur —
       première ligne de défense, `apply` re-vérifiera)
 
-### 4.4 Règles dynamiques & branchement Airflow
+### 4.5 Règles dynamiques & branchement Airflow
 - [ ] ≥ 3 règles dbt générées (format, complétude, cohérence) écrites sur disque et **vertes** une fois
       réintégrées dans dbt
 - [ ] Tâches Airflow `check_bronze` / `check_silver` / `check_gold` : invoquent l'agent avec
-      `(layer, table, batch_id)` après chaque couche
+      `(dataset, layer, table, batch_id)` après chaque couche
 
-### 4.5 Validation sur les anomalies réelles
+### 4.6 Validation sur les anomalies réelles
 - [ ] Rejouer la fenêtre avec injections : l'agent détecte le renommage (J45), les nulls (J60), les
       doublons (J75), la troncature (J80)
 - [ ] **Le moment clé** ⭐ : l'agent signale le cluster `sao paulo` que la baseline rate
 - [ ] Sur la récidive (J85) : `diagnose` **cite l'incident de J60** dans son contexte
+- [ ] **Table de couverture** à produire — quel détecteur attrape quoi, contre quelle référence :
 
-**☑ Phase terminée quand** : l'agent tourne dans le DAG sur les 3 couches ; il détecte les 4 anomalies
-injectées + le cas sémantique réel ; chaque run a sa ligne `INCIDENTS` ; la récidive est reconnue.
+  | Anomalie | Détecteur | Référence |
+  |---|---|---|
+  | `schema_drift_j45` | schéma | dernier schéma connu |
+  | `nulls_j60` | contrat + statistique | clause `not_null` + historique |
+  | `duplicates_j75` | contrat (unicité) + statistique (volume) | clause unicité + historique |
+  | `truncate_j80` | statistique | historique des volumes |
+  | `nulls_j85` | idem J60 **+ mémoire** citant J60 | historique + `INCIDENTS` |
+  | `semantic_sao_paulo` ⭐ | sémantique | le batch avec lui-même |
+
+**☑ Phase terminée quand** : le socle tourne sur un second dataset sans modification de code ; les
+contrats sont générés et validés ; l'agent tourne dans le DAG sur les 3 couches ; il détecte les 4
+anomalies injectées + le cas sémantique réel ; chaque run a sa ligne `INCIDENTS` ; la récidive est
+reconnue ; une anomalie refusée n'est plus resoumise.
 
 ---
 
@@ -289,35 +458,65 @@ injectées + le cas sémantique réel ; chaque run a sa ligne `INCIDENTS` ; la r
 **Objectif** : la boucle complète proposition → décision humaine → application → vérification, avec les
 garde-fous structurels. La deuxième jambe du projet.
 
+> **Révision 2026-07-28** : la décision humaine a **3 issues** (`approved` / `amend_contract` /
+> `rejected`), et un 4ᵉ garde-fou structurel s'ajoute : **l'agent n'invente jamais une valeur**.
+
 ### 5.1 Propose réel
 - [ ] Construction de la proposition complète : anomalie, cause diagnostiquée, **SQL exact** de la
-      correction, impact estimé, incidents similaires passés
+      correction, **impact estimé**, incidents similaires passés
+- [ ] ⚠️ **L'impact est la ligne la plus importante** — sans elle l'humain ne peut pas juger. Exemple :
+      « 1 ligne sur 351 » semble négligeable jusqu'à voir « panier moyen 42,30 → 65,00 (+53,7 %) ».
 - [ ] `interrupt()` avec la proposition en payload ; état persisté (checkpointer)
 - [ ] File des propositions en attente lisible **hors process** (jointure checkpointer ↔ `INCIDENTS`) —
       c'est ce que Streamlit affichera en phase 6
 
-### 5.2 Reprise & Apply borné
-- [ ] Injection de la décision : `approved` / `rejected` + **identité du décideur + horodatage** →
-      stockés dans `INCIDENTS`
+### 5.2 Garde-fou : ne jamais inventer une valeur ⬅️ *nouveau*
+Face à une valeur hors bornes (8000 dans une colonne à [1–100]), l'agent **ne peut pas savoir** s'il
+s'agit de 80,00 € en centimes, d'une faute de frappe, ou d'une vraie grosse commande. Proposer
+« remplacer 8000 par 80 », c'est **fabriquer de la donnée qui n'a jamais existé**.
+
+- [ ] Corrections **autorisées** : isoler en quarantaine · mettre à NULL + marquer · exclure des agrégats
+      Gold (la valeur brute reste intacte en Bronze pour audit)
+- [ ] Correction **interdite** : substituer une valeur devinée — rejet dans `apply` **même après
+      approbation humaine**, exactement comme les mots-clés destructeurs
+- [ ] Proposition par défaut sur un outlier : *isoler + exclure de l'agrégat*, jamais *remplacer*
+
+### 5.3 Reprise, Apply borné, Amend
+- [ ] Injection de la décision : `approved` / `amend_contract` / `rejected` + **identité du décideur +
+      horodatage** → stockés dans `INCIDENTS`
 - [ ] `apply` réel : transaction SQL ; vérifications **même après approbation** :
   - [ ] la requête ne touche que la table diagnostiquée
   - [ ] rejet des mots-clés destructeurs (`DROP`, `TRUNCATE`, `DELETE` sans `WHERE`…)
+  - [ ] rejet de toute substitution de valeur devinée (§5.2)
   - [ ] comptage lignes affectées avant/après conservé dans le log
+- [ ] `amend` réel ⬅️ *nouveau* : la donnée est juste, **le contrat avait tort** → écrit
+      `contracts/<table>.v2.yaml`, journalise le diff de clause, **n'écrit rien dans les données**
+- [ ] Distinguer les deux « non » dans l'UI et dans `INCIDENTS` :
+      *« c'est normal et ça le restera »* → `amend_contract` (permanent) ·
+      *« exceptionnel, rien à changer »* → `rejected` (silence par signature)
 - [ ] `validate` réel : re-profilage → la métrique anormale est-elle revenue dans la normale ?
       échec → `validation_status = "failed_manual_review"`, **pas de re-tentative automatique**
 
-### 5.3 Les 3 tests de preuve (livrables, pas hygiène)
+### 5.4 Les tests de preuve (livrables, pas hygiène)
 - [ ] **P3** : aucun chemin vers `apply` sans `human_decision == "approved"`
+      (la branche `amend` ne doit **jamais** y mener)
+- [ ] **P4** ⬅️ *nouveau* : une proposition qui substitue une valeur devinée est **rejetée par `apply`**
+      même avec `human_decision == "approved"`
 - [ ] **Pause/reprise** : interruption + redémarrage du process + reprise correcte
 - [ ] **Apply borné** : requête hors table → rejet ; mot-clé destructeur → rejet
+- [ ] **Amend n'écrit pas** : après `amend_contract`, aucune ligne de données modifiée (vérifié par
+      comptage avant/après) ; seul le fichier de contrat change de version
 
-### 5.4 Bout en bout
-- [ ] Scénario complet sur le cas sémantique : détection → diagnostic → proposition → approbation (CLI) →
-      application (`UPPER` / normalisation ville en Silver) → validation → journal
-- [ ] Scénario refus : l'incident est journalisé, **aucune écriture** sur les données (vérifié)
+### 5.5 Bout en bout
+- [ ] Scénario **approbation** sur le cas sémantique : détection → diagnostic → proposition → approbation
+      (CLI) → application (normalisation ville en Silver) → validation → journal
+- [ ] Scénario **refus** : l'incident est journalisé, **aucune écriture** sur les données (vérifié) ;
+      au run suivant la même signature **n'est plus resoumise**
+- [ ] Scénario **amendement** : une valeur hors contrat légitime → contrat v2 → au run suivant, plus
+      aucune alerte sur cette clause
 
-**☑ Phase terminée quand** : les 3 tests de preuve passent ; les deux scénarios bout en bout (approbation
-et refus) se déroulent sans terminal ouvert sur Snowflake.
+**☑ Phase terminée quand** : les 5 tests de preuve passent ; les trois scénarios bout en bout
+(approbation, refus, amendement) se déroulent sans terminal ouvert sur Snowflake.
 
 ---
 
@@ -332,8 +531,12 @@ et refus) se déroulent sans terminal ouvert sur Snowflake.
 - [ ] **Incidents** : historique complet depuis `INCIDENTS` (filtres : couche, table, statut, période)
 - [ ] **Décision** : pour un incident — anomalie, raisonnement du LLM, cause racine, SQL proposé, impact,
       antécédents
-- [ ] **Validation HITL** : propositions en pause, diff avant/après estimé, boutons
-      **✅ Approuver / ❌ Refuser** → reprend réellement le graphe interrompu
+- [ ] **Validation HITL** : propositions en pause, diff avant/après estimé, **impact chiffré**, boutons
+      **✅ Approuver / 📝 Modifier le contrat / ❌ Refuser** → reprend réellement le graphe interrompu
+- [ ] **Signatures en silence** ⬅️ *nouveau (2026-07-28)* : la liste de tout ce que l'agent ne signale
+      plus (signature, qui a refusé, quand), **réactivable d'un clic**. C'est le garde-fou anti-cécité :
+      sans cet écran, l'agent devient progressivement muet sans que personne s'en aperçoive.
+- [ ] **Contrats** : consultation des `contracts/*.yaml` et de leur historique de versions
 
 ### 6.2 Intégration & démo
 - [ ] Le clic Approuver/Refuser passe par le même mécanisme que `scripts/decide.py` (une seule voie de
@@ -385,7 +588,8 @@ normalisation manquante en Silver, et la proposition affiche l'impact aval.
 - [ ] Une commande unique reproduit chaque chiffre
 
 ### 8.2 Métriques
-- [ ] **Précision** et **rappel** (vs `ground_truth.yaml`)
+- [ ] **Précision** et **rappel** (vs `ground_truth.yaml`) — la précision se calcule à partir des
+      incidents `rejected` : c'est pour ça que même un faux positif doit être journalisé (§4.4)
 - [ ] **Anomalies sémantiques détectées** (invisibles à la baseline) — inclut le cas réel `sao paulo`
 - [ ] **MTTR** : délai détection → cause identifiée (agent vs estimation manuelle documentée)
 - [ ] **Taux d'approbation** des propositions (qualité des diagnostics)
@@ -407,7 +611,9 @@ reproductibles en une commande ; section limites honnête rédigée.
 
 ### 9.1 Documentation finale
 - [ ] README final : schémas à jour (dont `agent_graph.png` réel), installation, exécution du fil rouge
-- [ ] Relire tous les ADR (001 → 009) — ils ont été écrits au fil de l'eau, ici on ne fait que relire
+- [ ] Relire tous les ADR (001 → 010) — ils ont été écrits au fil de l'eau, ici on ne fait que relire
+- [ ] Démo de généricité : brancher un dataset inconnu du jury en direct (nouveau `datasets/*.yaml`
+      + découverte) — la preuve la plus forte que l'agent n'est pas cousu main pour Olist
 - [ ] Section limites connues & perspectives (extensions non réalisées, OpenMetadata)
 - [ ] Ce fichier `PROGRESS.md` à jour — il raconte l'histoire réelle du projet
 
@@ -437,4 +643,6 @@ dans le temps imparti, testée en conditions réelles.
 | 2026-07-21 | 1 | ✅ **Phase 1 terminée** : exploration → `docs/dataset.md` ; fenêtre 2018-03-01→05-31 figée ; `replay.py` (92 j rejoués) ; `inject.py` + `ground_truth.yaml` (5 anomalies vérifiées + cas réel São Paulo) ; 12 tests verts (témoin, déterminisme, cohérence corrigé↔batchs) | 6 tables retenues ; ground_truth = config d'injection (source unique) ; plan modifiable jusqu'au benchmark, gelé ensuite |
 | 2026-07-22 | 2 | 🚧 **2.1 Ingestion Bronze** : `ingestion/load.py` (brut→RAW, VARCHAR, idempotent, `OPS._SCHEMA_HISTORY`) ; fenêtre entière chargée (92 j transactionnels + référentiels au J1) ; idempotence prouvée ; dérive schéma J45 (`payment_value`→`amount`) confirmée conforme au corrigé | pyarrow ajouté (write_pandas) ; `--day` = ce qu'Airflow appellera en 2.3 ; backfill manuel ≠ incrémental auto |
 | 2026-07-22 | 2 | 🚧 **2.2 dbt Silver+Gold** : projet dbt (6 vues `stg_` + 5 tables `fct_`), tests baseline figés attrapant les 4 anomalies faciles (13 PASS / 5 détections), preuve du trou sémantique (`fct_geolocation_by_city` : São Paulo en 3 lignes) | Fan-out ancré sur `geolocation_city` (pas `customer_city`, déjà ASCII) → mart démonstrateur dédié ; les 5 tests rouges = détections, pas des bugs (signal pour Airflow 2.3) |
-|  |  |  |  |
+| 2026-07-24 | 2 | 🚧 **2.3 scaffolding Airflow** : `Dockerfile` (venv isolé du pipeline), `docker-compose.yaml` (LocalExecutor + Postgres), DAG `medallion_pipeline` (8 tâches, `@daily`, `catchup=True`), `archive_baseline.py`, runbook Windows | Airflow tourne **sur le PC de Hoda** (pas de Docker sur le serveur) → modèle « code ici, exécution là-bas » ; tests dbt tolérants par code de sortie (rc=1 = détection = vert) ; `.gitattributes` force LF (CRLF Windows) |
+| 2026-07-27 | 2 | ✅ **Phase 2 terminée** : DAG dépausé sur le PC → **92 runs verts** (backfill complet de la fenêtre) ; RAW/STAGING/MARTS peuplés ; `benchmarks/baseline_run.json` archivé (92 entrées, commit `8ffd7a1`) | **La baseline est figée** — plus aucune modification à partir d'ici, c'est le point de comparaison du benchmark (phase 8) |
+| 2026-07-28 | 3–5 | 📐 **Révision de design (aucun code)** : l'agent doit être **générique**, Olist n'étant qu'un cas de test. Séance de conception → PROGRESS mis à jour (phases 3, 4, 5, 6, 8, 9) | **5 décisions** : (1) deux cycles — Découverte (contrats) + Surveillance (graphe) ; (2) zéro nom en dur, classification par **rôle de colonne** ; (3) le **contrat versionné** devient le 3ᵉ pilier de détection, construit sur J1→J44 (période propre) ; (4) graphe à **8 nœuds**, `propose` a 3 issues (+ `amend_contract`) ; (5) garde-fou **« ne jamais inventer une valeur »**. Piège identifié : un contrat auto-généré naïvement graverait `sao paulo`/`são paulo` comme valides → la découverte doit *critiquer*, pas seulement enregistrer. ADR 010 à rédiger. |

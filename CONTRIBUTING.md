@@ -45,7 +45,7 @@ obscurément.
 
 ---
 
-## 3. Les 6 règles non négociables
+## 3. Les 7 règles non négociables
 
 Elles ne sont pas stylistiques. **Chacune protège une propriété qui rend le projet défendable** — une PR
 qui en casse une est refusée, quelle que soit sa valeur par ailleurs.
@@ -69,6 +69,10 @@ Le graphe ne contient **aucune arête `Diagnose → Apply`**. La seule entrée d
 `human_decision == "approved"`. Ajouter un raccourci « juste pour le dev » — même derrière un flag —
 est un bug : c'est précisément la promesse du projet ([`DESIGN.md` §5](docs/DESIGN.md)).
 
+La branche `amend_contract` **n'y mène pas non plus** : amender une règle ne donne aucun droit
+d'écriture sur les données. Et le défaut de l'aiguillage après `Propose` est **`Log`, jamais `Apply`** —
+une décision absente ou mal orthographiée ne doit pas pouvoir déclencher une écriture.
+
 **Le test** : le test de preuve P3 (« aucune exécution n'atteint `Apply` sans approbation ») doit passer
 sur chaque commit.
 
@@ -89,6 +93,32 @@ posera sur la feature.
 Y compris « rien d'anormal », y compris « refusé », y compris « échec ». Le journal est append-only :
 on n'update jamais une ligne d'incident passée (les corrections d'état passent par de nouvelles lignes).
 Un journal à trous ne prouve rien.
+
+C'est aussi **topologique** : `Log` est le seul nœud relié à END. Brancher un nœud directement sur END,
+même temporairement, casse la règle sans qu'aucun test métier ne s'en aperçoive.
+
+### R7 — L'agent n'invente jamais une valeur
+
+*(règle ajoutée le 2026-07-28, au même rang que le HITL)*
+
+Face à une valeur hors bornes — `8000` dans une colonne à [1–100] — l'agent **ne peut pas savoir** s'il
+s'agit de 80,00 € saisis en centimes, d'une faute de frappe, ou d'une vraie grosse commande. Proposer
+« remplacer 8000 par 80 », c'est **fabriquer de la donnée qui n'a jamais existé**.
+
+| | Autorisé |
+|---|---|
+| isoler en quarantaine | ✅ |
+| mettre à NULL + marquer | ✅ |
+| exclure d'un agrégat Gold (la valeur brute reste en Bronze pour audit) | ✅ |
+| **substituer une valeur devinée** | ❌ rejeté par `Apply`, même après approbation |
+
+Proposition par défaut sur un outlier : *isoler + exclure de l'agrégat*, jamais *remplacer*.
+
+La règle contraint l'**agent**, pas l'humain : lui peut avoir appelé le fournisseur, et affirme sa
+valeur via `fix_override` — qui trace que la correction appliquée n'était pas celle proposée. R4 reste
+actif dans les deux cas.
+
+**Le test** : le test de preuve P4.
 
 ---
 
@@ -156,16 +186,17 @@ quatre mois, c'est ce qui permet de reconstituer l'histoire du projet — et de 
 
 ### Le principe
 
-Un seul node appelle le LLM. **Les six autres sont testables sans mock** — c'est le bénéfice direct de
+Un seul node appelle le LLM. **Les sept autres sont testables sans mock** — c'est le bénéfice direct de
 R1, et il faut l'encaisser.
 
 | Quoi | Comment |
 |------|---------|
 | Nodes déterministes | Test unitaire direct, état factice en entrée |
 | `Diagnose` | **LLM mocké** — on teste le parsing et la gestion d'erreur, pas le LLM |
-| Routage | Les 3 chemins du graphe : rien d'anormal / refusé / approuvé |
+| Routage | Les 4 chemins du graphe : rien d'anormal / refusé / **amendé** / approuvé |
 | Pause & reprise | Une exécution interrompue sur `Propose` reprend après redémarrage du process |
-| `Apply` | Requête hors table diagnostiquée → rejet ; mot-clé destructeur → rejet |
+| `Apply` | Requête hors table diagnostiquée → rejet ; mot-clé destructeur → rejet ; valeur devinée → rejet |
+| `Amend` | Après `amend_contract`, aucune ligne de données n'a bougé ; seul le contrat change de version |
 | Journal | Tout chemin (y compris « rien d'anormal ») produit sa ligne `INCIDENTS` |
 | Tools | Chacun isolément, avant tout branchement dans un node |
 
@@ -179,11 +210,16 @@ make check         # lint + test
 
 ### Les tests qui sont des livrables
 
-Trois tests ne sont pas de l'hygiène — ce sont les **preuves** du projet, celles qu'on montre au jury :
+Cinq tests ne sont pas de l'hygiène — ce sont les **preuves** du projet, celles qu'on montre au jury :
 
 1. **Aucun chemin vers `Apply` sans `human_decision == "approved"`** — prouve le HITL structurel (P3).
-2. **Pause sur `interrupt` + reprise après redémarrage** — prouve que le HITL est un mécanisme, pas une démo.
-3. **`Apply` borné** (table unique, mots-clés rejetés) — prouve que l'approbation n'ouvre pas tout.
+   La branche `amend_contract` ne doit pas y mener.
+2. **Une valeur devinée est rejetée par `Apply` même approuvée** — prouve que l'agent ne fabrique pas
+   de donnée (P4, R7).
+3. **Pause sur `interrupt` + reprise après redémarrage** — prouve que le HITL est un mécanisme, pas une démo.
+4. **`Apply` borné** (table unique, mots-clés rejetés) — prouve que l'approbation n'ouvre pas tout.
+5. **`Amend` n'écrit pas dans les données** (comptage avant/après) — prouve que les deux « non » sont
+   vraiment deux mécanismes différents.
 
 Ne les traitez pas comme des tests ordinaires.
 

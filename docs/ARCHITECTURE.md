@@ -12,16 +12,17 @@
 
 ## 1. Principes directeurs
 
-Cinq invariants. Tout le reste en découle, et **aucun n'est négociable** — une PR qui en casse un est
+Six invariants. Tout le reste en découle, et **aucun n'est négociable** — une PR qui en casse un est
 refusée, quelle que soit sa valeur par ailleurs.
 
 | # | Principe | Conséquence concrète |
 |---|----------|----------------------|
 | **P1** | **Le graphe contrôle le flux, le LLM ne fait que raisonner** | Le LLM n'est appelé **que** dans `Diagnose`. Le routage et les décisions sont du code déterministe et testable. |
 | **P2** | **Le LLM ne voit jamais les données brutes** | Il reçoit des **statistiques agrégées et des métadonnées**. L'accès aux échantillons passe par un tool en lecture seule, journalisé et masquable. |
-| **P3** | **Aucune correction sans validation humaine** | Le graphe ne contient **aucun chemin** `Diagnose → Apply` : la seule arête entrante d'`Apply` vient de `Propose` avec `human_decision == "approved"`. Prouvé par test. |
+| **P3** | **Aucune correction sans validation humaine** | Le graphe ne contient **aucun chemin** `Diagnose → Apply` : la seule arête entrante d'`Apply` vient de `Propose` avec `human_decision == "approved"`. La branche `amend_contract` n'y mène pas non plus. Prouvé par test. |
 | **P4** | **`Apply` est borné, même après approbation** | Transaction SQL, table diagnostiquée uniquement, mots-clés destructeurs rejetés, `Validate` systématique après coup. |
-| **P5** | **Le journal est append-only et complet** | `logs: Annotated[list, add]` + une ligne dans `INCIDENTS` pour **chaque** run, y compris « rien d'anormal » et « refusé ». |
+| **P5** | **Le journal est append-only et complet** | `logs: Annotated[list, add]` + une ligne dans `INCIDENTS` pour **chaque** run, y compris « rien d'anormal » et « refusé ». `Log` est le **seul** nœud relié à END : la complétude du journal est topologique. |
+| **P6** | **L'agent n'invente jamais une valeur** *(2026-07-28)* | Il peut isoler, mettre à NULL, exclure d'un agrégat — jamais deviner (`8000` → `80`). Une correction qui substitue une valeur devinée est rejetée par `Apply` **même après approbation humaine**. Contraint l'agent, pas l'humain (voir §6). |
 
 ---
 
@@ -59,9 +60,11 @@ refusée, quelle que soit sa valeur par ailleurs.
    │                                                   │
    │  Profile ► Detect ► Diagnose(LLM) ► Propose ⏸     │
    │                       ► Apply ► Validate ► Log    │
+   │                       └─ ou ► Amend ► Log         │
    │                                                   │
    │  Diagnose intègre : mémoire (INCIDENTS)           │
    │                     + cause racine (lineage dbt)  │
+   │  Contrats : contracts/<table>.vN.yaml             │
    │  Persistance : Checkpointer (SqliteSaver)         │
    └────────────────────┬──────────────────────────────┘
                         │
@@ -149,18 +152,28 @@ les incidents ayant reçu une décision humaine), **source du benchmark** (MTTR,
 L'état circule entre les nodes. Un node lit l'état, retourne un état enrichi — il n'écrit nulle part
 ailleurs.
 
+Implémenté dans [`agent/state.py`](../agent/state.py) ; spécification complète et commentée au §5.2 du
+[cahier des charges](../CAHIER_DES_CHARGES.md).
+
 ```python
 class AgentState(TypedDict):
+    dataset: str                      # nom du registre datasets/<dataset>.yaml
     layer: str                        # bronze | silver | gold (contexte Airflow)
     table: str
     batch_id: str
-    profile: dict                     # ← Profile
+    contract: dict                    # contracts/<table>.yaml — « ce qui devrait être vrai »
+    contract_version: Optional[str]   # "v1", "v2"… ; None si pas encore de contrat
     schema_history: list
+    profile: dict                     # ← Profile
     anomalies: list                   # ← Detect
     past_incidents: list              # ← lus dans INCIDENTS (mémoire)
     diagnosis: Optional[dict]         # ← Diagnose (LLM) : root_cause, proposed_fix, explanation
-    human_decision: Optional[str]     # ← Propose : "approved" | "rejected"
-    validation: Optional[dict]        # ← Validate : success | failed
+    human_decision: Optional[str]     # ← Propose : "approved" | "amend_contract" | "rejected"
+    decided_by: Optional[str]         # qui a tranché
+    decided_at: Optional[str]         # quand (ISO 8601)
+    fix_override: Optional[str]       # la correction réécrite par l'humain, si différente
+    applied_fix: Optional[str]        # celle qui a réellement tourné
+    validation: Optional[dict]        # ← Validate : success | failed_manual_review
     logs: Annotated[list, add]        # append-only
 ```
 
@@ -169,18 +182,38 @@ par construction*. Un node ne peut pas réécrire l'histoire, même par erreur (
 
 ### 5.2 Les nodes
 
+Huit nodes, câblés dans [`agent/graph.py`](../agent/graph.py).
+
 | Node | LLM ? | Rôle |
 |------|:-----:|------|
 | `Profile` | ❌ | Statistiques agrégées via `profile_table` ; persiste dans `_profiles` |
-| `Detect` | ❌ | Dérive de schéma (diff) + dérives statistiques (z-score vs historique) + anomalie sémantique (clustering) + échecs dbt test |
+| `Detect` | ❌ | Dérive de schéma (diff) + **violation de contrat** + dérives statistiques (médiane/MAD vs historique) + collisions sémantiques + échecs dbt test |
 | `Diagnose` | ✅ | **Le seul appel LLM.** Stats + métadonnées + lineage dbt + incidents passés → diagnostic structuré (cause, correction proposée, explication) |
-| `Propose` | ❌ | `interrupt()` — met le graphe en pause, attend la décision humaine (Streamlit) |
-| `Apply` | ❌ | Écrit — **uniquement si `human_decision == "approved"`**, en transaction, table diagnostiquée seulement |
+| `Propose` | ❌ | `interrupt()` — met le graphe en pause, attend la décision humaine (Streamlit). **3 issues** : `approved`, `amend_contract`, `rejected` |
+| `Apply` | ❌ | Écrit dans les **données** — uniquement si `human_decision == "approved"`, en transaction, table diagnostiquée seulement |
+| `Amend` | ❌ | Écrit dans le **contrat** (v1 → v2) — la donnée était juste, c'est la règle qui a vieilli. **N'écrit rien dans les données** |
 | `Validate` | ❌ | Re-profile la table : l'anomalie a-t-elle disparu ? Échec → « à traiter manuellement » |
-| `Log` | ❌ | Une ligne dans `INCIDENTS`, quel que soit le chemin parcouru |
+| `Log` | ❌ | Une ligne dans `INCIDENTS`, quel que soit le chemin parcouru. **Sortie unique du graphe** |
 
-**Un seul node appelle le LLM.** C'est la propriété qui rend le système testable : les six autres sont
+**Un seul node appelle le LLM.** C'est la propriété qui rend le système testable : les sept autres sont
 du code déterministe, couverts par des tests unitaires sans mock.
+
+**Un seul node écrit dans les données** — `Apply`, un sur huit. `Amend` écrit lui aussi, mais dans un
+fichier de contrat versionné dans git, jamais dans une table. Les six autres lisent, mesurent,
+raisonnent ou journalisent.
+
+### 5.2 bis — Les deux arêtes conditionnelles
+
+Ce sont les deux seules décisions de parcours du graphe, et elles sont du code déterministe :
+
+| Arête | Fonction | Branches |
+|-------|----------|----------|
+| après `Detect` | `route_after_detect` | `anomalies` → `Diagnose` · `rien d'anormal` → `Log` |
+| après `Propose` | `route_after_propose` | `approved` → `Apply` · `amend_contract` → `Amend` · `rejected` → `Log` · `sans décision` → `Log` |
+
+Le défaut de `route_after_propose` est **`Log`, jamais `Apply`** : une décision absente, mal orthographiée
+ou inventée par un client mal écrit retombe sur le journal. Un run qui finit à tort en « rien fait » se
+rattrape ; une écriture faite à tort, non.
 
 ### 5.3 Les tools
 
@@ -213,11 +246,41 @@ en trois mécanismes :
    correction exacte, l'impact estimé (tables aval via lineage) et les incidents similaires passés.
    Approuver n'est pas un acte de foi.
 
+### Les deux « non » ne sont pas le même non
+
+L'humain a **trois** réponses, pas deux. La distinction entre les deux refus est ce qui empêche le
+contrat de vieillir :
+
+| Réponse | Ce que ça veut dire | Effet |
+|---------|---------------------|-------|
+| `approved` | la donnée est fausse | `Apply` corrige les données |
+| `amend_contract` | *« c'est normal et ça le restera »* — la donnée est juste, la règle a vieilli | `Amend` passe le contrat en v2 ; **aucune écriture sur les données** |
+| `rejected` | *« exceptionnel, rien à changer »* | `Log` seul ; la signature est mise en silence, la règle est conservée |
+
+Confondre les deux ferait soit vieillir le contrat (il crie à chaque évolution normale du métier,
+l'équipe s'habitue à ignorer les alertes, l'agent meurt), soit rendre l'agent aveugle (une règle
+amendée à tort le fait taire sur une vraie anomalie — silencieusement).
+
+Garde-fou anti-cécité : rien n'est supprimé, tout est en base. La liste des signatures en silence est
+requêtable, affichée dans Streamlit, et **réactivable d'un clic**.
+
+### Ce qui contraint l'agent mais pas l'humain
+
+P6 (« ne jamais inventer une valeur ») s'applique à l'agent seul. Il ne peut pas savoir si `8000` valait
+`80` ; l'humain, lui, peut avoir appelé le fournisseur. L'humain a l'autorité pour affirmer une valeur —
+via `fix_override`, qui trace que la correction appliquée n'était pas celle proposée. Les garde-fous P4
+(table unique, mots-clés destructeurs) restent actifs dans les deux cas : ils protègent contre
+l'accident, pas contre le jugement.
+
 Ce qui est **testé** (les preuves, pas de simples tests d'hygiène) :
 
-- Aucun chemin d'exécution n'atteint `Apply` sans `human_decision == "approved"`.
+- **P3** — aucun chemin d'exécution n'atteint `Apply` sans `human_decision == "approved"` ; la branche
+  `amend_contract` n'y mène pas.
+- **P4** — une proposition qui substitue une valeur devinée est rejetée par `Apply` même approuvée.
 - Une exécution se met en pause sur `interrupt` et reprend correctement après décision.
 - `Apply` refuse toute requête hors de la table diagnostiquée (et les mots-clés destructeurs).
+- Après `amend_contract`, **aucune ligne de données n'a bougé** (comptage avant/après).
+- Les quatre chemins du graphe passent tous par `Log` avant END.
 
 ---
 
@@ -236,9 +299,12 @@ Airflow déclenche agent_qualite(layer, table, batch_id)
    │                    └─ PydanticOutputParser → cause, correction, explication
    ├─ Propose ......... interrupt() ⏸  … l'humain décide dans Streamlit … ▶ reprise
    │
-   ├─ (refusé) ───────────────────────────────────────► Log ──► END
+   ├─ (rejected) ─────────────────────────────────────► Log ──► END
    │
-   ├─ Apply ........... transaction, table diagnostiquée uniquement
+   ├─ (amend_contract) ─► Amend ─ contracts/<table>.v2.yaml
+   │                              aucune écriture sur les données ──► Log ──► END
+   │
+   ├─ (approved) ─► Apply ... transaction, table diagnostiquée uniquement
    ├─ Validate ........ re-profilage ; succès, ou « échec — à traiter manuellement »
    └─ Log ............. INSERT INTO INCIDENTS ──► END
 ```
@@ -305,6 +371,8 @@ Chaque décision a son ADR dans [`adr/`](adr/), au format *contexte / options / 
 | `006` | ~~Policy-as-code vs seuils en dur~~ — **remplacé par `008`** |
 | `007` | Agent vs dbt tests seuls |
 | `008` | **HITL pur vs scoring d'autonomie** (décision v4) |
+| `009` | **Source hybride** — Olist rejoué + injection contrôlée vs génération Faker |
+| `010` | **Agent générique** (décision du 2026-07-28) — deux cycles, zéro nom en dur, contrat versionné, 8 nœuds / 3 issues, ne jamais inventer une valeur |
 
 > Les ADR se rédigent **au fil de l'eau**, pas en phase finale. Une décision reconstituée trois mois plus
 > tard est une justification, pas une décision.
