@@ -18,6 +18,8 @@ dbt/target/
 dbt/dbt_packages/
 dbt/logs/
 dbt/.user.yml
+# dbt écrit aussi ici quand il est lancé depuis la racine du dépôt
+logs/
 
 # Checkpoints LangGraph (SQLite)
 *.sqlite
