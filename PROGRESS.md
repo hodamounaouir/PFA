@@ -41,7 +41,7 @@ Changer de dataset = écrire un nouveau `datasets/<nom>.yaml` et refaire le benc
 | 0 | Fondations & accès | 3–5 j | ✅ terminé le 2026-07-21 |
 | 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ✅ terminé le 2026-07-21 |
 | 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | ✅ terminé le 2026-07-27 |
-| 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | 🚧 **en cours** (3.1 ✅ · 3.2 ✅ · 3.4 ✅ · reste 3.3, ADR 010, PNG) |
+| 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | 🚧 **en cours** (3.1 ✅ · 3.2 ✅ · 3.3 ✅ · 3.4 ✅ · reste ADR 010 + PNG) |
 | 4 | Socle générique + agent réel + `INCIDENTS` | 3 sem | ⬜ |
 | 5 | HITL complet : pause, reprise, Apply borné | 1–2 sem | ⬜ |
 | 6 | Observabilité & validation Streamlit | 1–2 sem | ⬜ |
@@ -311,14 +311,36 @@ au même titre que « aucun chemin n'atteint `apply` sans approbation » — et 
       (`_loop.py`, `resume_is_map` référencé avant affectation). Le cas « aucune décision » n'est donc
       pas injectable au niveau du graphe ; il est couvert au niveau unitaire (`lire_reponse(None)`,
       `route_after_propose`). À re-tester lors d'une future montée de version.
-- [ ] Note de conception : **un seul mécanisme d'interruption, trois usages** (corriger / amender /
+- [x] Note de conception : **un seul mécanisme d'interruption, trois usages** (corriger / amender /
       refuser) — et il resservira tel quel pour la validation des contrats en phase 4
+      *(écrite dans l'en-tête de `agent/nodes/propose.py` et dans `scripts/decide.py`)*
 
-### 3.3 Premier vrai appel LLM
-- [ ] `diagnose` : appel Groq réel + `PydanticOutputParser` → sortie forcée
-      `{root_cause, proposed_fix, explanation}`
-- [ ] Gestion d'échec de parsing : l'état porte `diagnosis = None` → le run se termine en
+### 3.3 Premier vrai appel LLM ✅
+- [x] `diagnose` : appel Groq réel → sortie forcée `{root_cause, proposed_fix, explanation}`
+      *(nouveau module `agent/llm.py` : **une seule frontière réseau** dans tout le projet — si un
+      appel LLM apparaît ailleurs, la règle R1 est cassée et ça se voit d'un `grep`. Modèle
+      `llama-3.3-70b-versatile`, `temperature=0`.)*
+- [x] **Écart assumé au plan** : `PydanticOutputParser` (LangChain) remplacé par le **mode JSON natif
+      de Groq** (`response_format={"type": "json_object"}`) + validation Pydantic. Le parser injecte des
+      consignes de format dans le prompt puis parse ; le mode JSON **empêche le format invalide
+      d'exister**. Les deux barrières sont conservées : l'API garantit un JSON *valide*, Pydantic
+      garantit que c'est le *bon* JSON (un modèle peut renvoyer `cause` au lieu de `root_cause`).
+- [x] **Barrière R2 explicite** : `construire_contexte()` choisit champ par champ ce qui part au modèle,
+      au lieu de faire confiance au profil. Testé avec un profil qui transporte un échantillon de lignes
+      — la tentation exacte de la phase 4 : il ne franchit pas la barrière.
+- [x] Gestion d'échec : l'état porte `diagnosis = None` → le run continue vers `propose` en
       « à traiter manuellement » (pas d'exception qui tue le graphe)
+      *(réseau coupé, clé absente, quota dépassé, JSON illisible, champ manquant → même mode dégradé.
+      L'humain voit alors les **faits** établis par `detect` sans LLM, et décide sans explication.)*
+- [x] **Garde-fou de test structurel** (`tests/conftest.py`) : deux fixtures `autouse` — la couture LLM
+      est simulée pour toute la suite, **et** la création d'un client Groq lève. Écrit après s'être fait
+      prendre : trois helpers appelaient la vraie API, la suite est passée de 6 à 172 s et dépendait du
+      réseau. Une règle qu'on peut oublier n'est pas une règle.
+- [x] **Vérification par mutation** — trois sabotages, tous détectés : suppression du `try/except` →
+      les tests de panne tombent · fuite du profil complet dans le contexte → `test_le_modele_ne_voit_
+      que_des_agregats` tombe · retrait de la consigne « ne jamais deviner » → le test de consigne tombe.
+- Dépendance déclarée : `pydantic` (l'agent s'en sert directement, il ne doit pas dépendre du hasard
+  d'une dépendance transitive de LangGraph).
 
 ### 3.4 Tests
 > Écrits dans `tests/test_agent_graph.py` (85 tests). Principe retenu : **chaque preuve est établie

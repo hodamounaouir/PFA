@@ -13,9 +13,13 @@ Ce fichier grandit d'un bloc à chaque nœud ajouté.
 """
 
 import copy
+import importlib
+import json
 
 import pytest
+from pydantic import ValidationError
 
+from agent.llm import CONSIGNES, Diagnostic
 from agent.nodes import amend, apply, detect, diagnose, log, profile, propose, validate
 from agent.nodes.amend import _version_suivante
 from agent.nodes.validate import VALIDATION_OK
@@ -28,6 +32,13 @@ from agent.state import (
     log_entry,
     new_state,
 )
+
+# ⚠️ `agent.nodes.__init__` réexporte les fonctions sous le nom de leur module :
+# `agent.nodes.diagnose` désigne donc la **fonction**, pas le module. Un
+# `import agent.nodes.diagnose as m` récupère la fonction et les `monkeypatch`
+# ne remplacent rien — silencieusement, en laissant partir de vrais appels
+# réseau. On va donc chercher le module explicitement.
+diagnose_mod = importlib.import_module("agent.nodes.diagnose")
 
 # Deux datasets volontairement étrangers l'un à l'autre.
 SCHEMA_COMMANDES = [
@@ -220,76 +231,182 @@ def etat_avec_ecart(colonne="col_trouee", table="RAW.ORDERS"):
     return state
 
 
-def test_diagnose_produit_les_trois_champs_attendus():
-    """Le contrat de sortie du LLM, figé dès le stub (étape 7 : forcé par Pydantic)."""
+# Depuis l'étape 3.3, `diagnose` appelle vraiment Groq. **Aucun test n'appelle un
+# LLM** (`CONTRIBUTING` : la CI doit être déterministe, gratuite, et tourner sans
+# clé API). On remplace donc `diagnostiquer`, la seule couture réseau du projet.
+
+
+@pytest.fixture
+def llm_qui_repond(monkeypatch):
+    """Un modèle qui répond correctement — et qui enregistre ce qu'il a reçu."""
+    recu = {}
+
+    def faux(contexte):
+        recu.update(contexte)
+        return Diagnostic(
+            root_cause="Cause plausible",
+            proposed_fix="Isoler les lignes concernées en quarantaine",
+            explanation="Parce que.",
+        )
+
+    monkeypatch.setattr(diagnose_mod, "diagnostiquer", faux)
+    return recu
+
+
+@pytest.fixture
+def llm_en_panne(monkeypatch):
+    def faux(contexte):
+        raise ConnectionError("Groq injoignable")
+
+    monkeypatch.setattr(diagnose_mod, "diagnostiquer", faux)
+
+
+def test_diagnose_produit_les_trois_champs_attendus(llm_qui_repond):
+    """Le contrat de sortie, désormais **imposé** par Pydantic côté `agent/llm.py`."""
     diagnosis = diagnose(etat_avec_ecart())["diagnosis"]
     assert set(diagnosis) == {"root_cause", "proposed_fix", "explanation"}
     assert all(isinstance(v, str) and v for v in diagnosis.values())
 
 
-def test_diagnose_parle_de_l_ecart_qu_il_a_recu():
-    """Générique : il nomme la colonne trouvée par detect, il ne la connaît pas."""
-    rh = diagnose(etat_avec_ecart("salaire_brut", "HR.EMPLOYES"))["diagnosis"]
-    capteurs = diagnose(etat_avec_ecart("temperature_c", "IOT.MESURES"))["diagnosis"]
+def test_diagnose_transmet_l_ecart_recu_au_modele(llm_qui_repond):
+    """Générique : il transmet la colonne trouvée par `detect`, il ne la connaît pas."""
+    diagnose(etat_avec_ecart("salaire_brut", "HR.EMPLOYES"))
 
-    assert "salaire_brut" in rh["root_cause"]
-    assert "temperature_c" in capteurs["root_cause"]
-    assert "HR.EMPLOYES" in rh["proposed_fix"]
+    assert llm_qui_repond["table"] == "HR.EMPLOYES"
+    assert llm_qui_repond["ecarts_constates"][0]["colonne"] == "salaire_brut"
 
 
-def test_diagnose_propose_d_isoler_pas_de_deviner():
-    """Règle « ne jamais inventer une valeur » (garde-fou dur dans apply, phase 5.2).
+def test_le_modele_ne_voit_que_des_agregats(llm_qui_repond):
+    """**Règle R2.** `construire_contexte` choisit champ par champ ce qui part.
 
-    Face à un écart, l'agent ne peut pas savoir quelle était la bonne valeur.
-    Il isole, met à NULL ou exclut d'un agrégat — il ne substitue jamais.
+    On glisse ici un profil qui transporte un échantillon de lignes — la
+    tentation exacte de la phase 4 — et on vérifie qu'il ne franchit pas la
+    barrière. Sans ce test, un ajout innocent dans `profile` enverrait des
+    données clients à un service tiers sans que personne ne s'en aperçoive.
     """
-    fix = diagnose(etat_avec_ecart())["diagnosis"]["proposed_fix"]
-    assert "isoler" in fix.lower()
-    assert "sans modifier les valeurs" in fix.lower()
+    state = etat_avec_ecart()
+    state["profile"] = {
+        "row_count": 351,
+        "columns": {"nom_client": {"null_rate": 0.3}},
+        "echantillon": [{"nom_client": "Maria Silva"}],  # ne doit PAS sortir
+    }
+    diagnose(state)
+
+    envoye = json.dumps(llm_qui_repond, ensure_ascii=False)
+    assert "Maria Silva" not in envoye
+    assert "echantillon" not in envoye
+    # les agrégats, eux, sont bien transmis
+    assert llm_qui_repond["lignes_dans_le_lot"] == 351
+    assert llm_qui_repond["colonnes_profilees"] == ["nom_client"]
 
 
-def test_diagnose_sans_ecart_ne_fabrique_pas_de_diagnostic():
-    """Le graphe ne route pas ici sans écart, mais un nœud ne suppose rien.
+def test_les_consignes_interdisent_de_deviner_une_valeur():
+    """Règle « ne jamais inventer une valeur » (P6). La barrière dure sera dans
+    `apply` (phase 5.2) ; ici c'est la ligne éditoriale envoyée au modèle.
 
-    C'est aussi la forme qu'aura l'échec de parsing LLM à l'étape 7 :
-    `diagnosis = None`, run terminé en « à traiter manuellement », sans exception.
+    Ce test protège une **consigne**, pas un comportement : il devient rouge si
+    quelqu'un allège le prompt, ce qui est exactement le genre de modification
+    qui passerait inaperçue autrement.
     """
+    consignes = CONSIGNES.lower()
+    assert "jamais" in consignes and "remplacer" in consignes
+    for autorise in ("isoler", "quarantaine", "null", "exclure"):
+        assert autorise in consignes
+
+
+def test_diagnose_sans_ecart_ne_fabrique_pas_de_diagnostic(llm_qui_repond):
+    """Le graphe ne route pas ici sans écart, mais un nœud ne suppose rien."""
     result = diagnose(base_state())
     assert result["diagnosis"] is None
     assert result["logs"][0]["node"] == "diagnose"
+    assert llm_qui_repond == {}, "le LLM n'aurait pas dû être appelé"
 
 
-def test_diagnose_ne_modifie_pas_l_etat_recu():
+def test_un_llm_en_panne_ne_tue_pas_le_run(llm_en_panne):
+    """**Mode dégradé, pas panne.** Réseau coupé, quota dépassé, JSON illisible :
+    le run continue et l'humain voit les faits que `detect` a établis sans LLM.
+    Un projet dont le graphe s'effondre quand une API tierce tousse ne tient pas
+    en production."""
+    result = diagnose(etat_avec_ecart())
+
+    assert result["diagnosis"] is None
+    assert "manuellement" in result["logs"][0]["message"]
+    assert "ConnectionError" in result["logs"][0]["erreur"]
+
+
+@pytest.mark.parametrize(
+    "panne",
+    [
+        ConnectionError("réseau coupé"),
+        KeyError("GROQ_API_KEY"),
+        ValueError("JSON illisible"),
+        RuntimeError("quota dépassé"),
+    ],
+)
+def test_toutes_les_pannes_menent_au_meme_mode_degrade(monkeypatch, panne):
+    """On ne distingue pas les causes : elles ont toutes la même conséquence."""
+
+    def faux(contexte):
+        raise panne
+
+    monkeypatch.setattr(diagnose_mod, "diagnostiquer", faux)
+    assert diagnose(etat_avec_ecart())["diagnosis"] is None
+
+
+def test_un_diagnostic_incomplet_est_refuse():
+    """Le JSON peut être syntaxiquement valide et pourtant faux : un modèle peut
+    renvoyer deux champs sur trois. C'est Pydantic qui l'attrape, et l'échec
+    retombe dans le mode dégradé."""
+    with pytest.raises(ValidationError):
+        Diagnostic.model_validate({"root_cause": "x", "proposed_fix": "y"})
+
+
+def test_diagnose_ne_modifie_pas_l_etat_recu(llm_qui_repond):
     state = etat_avec_ecart()
     avant = copy.deepcopy(state)
     diagnose(state)
     assert state == avant
 
 
-def test_diagnose_ecrit_une_ligne_de_journal_au_format_commun():
+def test_diagnose_ecrit_une_ligne_de_journal_au_format_commun(llm_qui_repond):
     entry = diagnose(etat_avec_ecart())["logs"][0]
     assert entry["node"] == "diagnose"
     assert entry["anomalies"] == 1
     assert set(log_entry("x", "y")) <= set(entry)
 
 
-def test_les_trois_noeuds_s_enchainent():
-    """profile → detect → diagnose, comme dans le graphe."""
+def test_les_trois_noeuds_s_enchainent(llm_qui_repond):
+    """profile → detect → diagnose, comme dans le graphe.
+
+    On vérifie que l'écart trouvé par `detect` arrive bien jusqu'au modèle —
+    pas ce que le modèle en dit, qui ne nous appartient pas.
+    """
     state = base_state(SCHEMA_COMMANDES)
     state["profile"] = profile(state)["profile"]
     state["anomalies"] = detect(state)["anomalies"]
-    diagnosis = diagnose(state)["diagnosis"]
+    assert diagnose(state)["diagnosis"] is not None
 
-    assert SCHEMA_COMMANDES[1]["name"] in diagnosis["root_cause"]
+    ecart = llm_qui_repond["ecarts_constates"][0]
+    assert ecart["colonne"] == SCHEMA_COMMANDES[1]["name"]
 
 
 # --- Nœud 4/8 : propose ------------------------------------------------------
 
 
 def etat_diagnostique(colonne="col_trouee", table="RAW.ORDERS"):
-    """Un état prêt à être soumis — ce que `diagnose` aurait laissé."""
+    """Un état prêt à être soumis — ce que `diagnose` aurait laissé.
+
+    Le diagnostic est écrit en dur plutôt qu'obtenu en appelant `diagnose` :
+    depuis l'étape 3.3 cet appel partirait chez Groq, ce qui rendrait toute la
+    suite lente, payante et non déterministe. **Un helper de test ne doit
+    dépendre d'aucune API tierce.**
+    """
     state = etat_avec_ecart(colonne, table)
-    state["diagnosis"] = diagnose(state)["diagnosis"]
+    state["diagnosis"] = {
+        "root_cause": f"Écart de complétude sur « {colonne} » dans {table}.",
+        "proposed_fix": f"Isoler en quarantaine les lignes de {table} concernées.",
+        "explanation": "Un écart net et partiel évoque un incident technique amont.",
+    }
     return state
 
 
