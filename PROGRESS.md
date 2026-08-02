@@ -300,12 +300,31 @@ au même titre que « aucun chemin n'atteint `apply` sans approbation » — et 
       « à traiter manuellement » (pas d'exception qui tue le graphe)
 
 ### 3.4 Tests
-- [ ] Les **4 chemins** du graphe — 4 tests, LLM mocké :
+> Écrits dans `tests/test_agent_graph.py` (85 tests). Principe retenu : **chaque preuve est établie
+> deux fois**, une fois *topologiquement* (inspection du graphe compilé — vaut pour toute exécution,
+> y compris celles auxquelles on n'a pas pensé) et une fois *dynamiquement* (exécution réelle sur un
+> jeu de décisions hostiles). Une preuve statique seule laisserait passer un aiguillage qui ment ;
+> une preuve dynamique seule ne couvrirait que les cas testés.
+
+- [x] Les **4 chemins** du graphe — 4 tests, LLM mocké :
       rien d'anormal / refusé / **amendé** / approuvé
-- [ ] **Test de preuve P3** : instrumenter `apply` → prouver qu'aucune exécution ne l'atteint sans
+      *(+ un test qui vérifie que les 4 parcours sont réellement distincts, et un test de
+      préconditions : si le stub `profile` changeait, les autres deviendraient faussement verts)*
+- [x] **Test de preuve P3** : instrumenter `apply` → prouver qu'aucune exécution ne l'atteint sans
       `human_decision == "approved"` (parcours exhaustif — la branche `amend` ne doit **pas** y mener)
-- [ ] **Test de sortie unique** : les 4 chemins passent tous par `log` avant `END`
-- [ ] Test pause/reprise après redémarrage du process
+      *(topologie : `apply` n'a qu'une arête entrante, `("propose", "approved")` · exécution : 16
+      décisions invalides × 2 profils de batch, `apply` espionné, jamais atteint. Plus le test
+      réciproque — `apply` **est** atteint quand c'est approuvé — sans lequel un `apply` devenu
+      inatteignable en toutes circonstances passerait pour un succès)*
+- [x] **Test de sortie unique** : les 4 chemins passent tous par `log` avant `END`
+      *(topologie : `log` est le seul nœud relié à END · exécution : `log` apparaît exactement une
+      fois en fin de parcours, y compris avec une décision absurde)*
+- [x] **Vérification par mutation** — trois sabotages volontaires de `graph.py`, chacun bien détecté :
+      `propose` approuve tout → 57 échecs · `amend` recâblé vers `apply` → 6 échecs dont les deux
+      tests P3 dédiés · `validate` branché sur `END` → 3 échecs dont le test de sortie unique.
+      Un test qui ne peut pas échouer ne prouve rien.
+- [ ] Test pause/reprise après redémarrage du process ⬅️ *dépend du checkpointer (3.2), fera partie
+      de cette étape-là*
 
 **☑ Phase terminée quand** : les 4 chemins passent en test ; la reprise post-redémarrage marche ; les
 tests de preuve P3 et « sortie unique » passent ; le PNG du graphe est généré.
