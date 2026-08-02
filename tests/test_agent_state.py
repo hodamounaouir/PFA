@@ -17,7 +17,9 @@ def test_new_state_remplit_toutes_les_cles():
     Sans ce test, ajouter un champ à AgentState sans l'ajouter à new_state()
     passerait inaperçu jusqu'au premier KeyError en plein run.
     """
-    state = new_state(dataset="olist", layer="bronze", table="RAW.ORDERS", batch_id="2018-04-29")
+    state = new_state(
+        dataset="olist", layer="bronze", table="RAW.ORDERS", batch_id="2018-04-29"
+    )
     assert set(state) == set(AgentState.__annotations__)
 
 

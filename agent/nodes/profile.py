@@ -51,13 +51,13 @@ def _stats(position: int, row_count: int) -> dict:
     }
 
 
-
 def profile(state: AgentState) -> dict:
     colonnes = _colonnes(state)
     fiche = {
         "row_count": STUB_ROW_COUNT,
         "columns": {
-            nom: _stats(position, STUB_ROW_COUNT) for position, nom in enumerate(colonnes)
+            nom: _stats(position, STUB_ROW_COUNT)
+            for position, nom in enumerate(colonnes)
         },
     }
     return {

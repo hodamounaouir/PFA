@@ -11,7 +11,10 @@ import pandas as pd
 import pytest
 
 GEOLOCATION_CSV = (
-    Path(__file__).resolve().parent.parent / "data" / "olist" / "olist_geolocation_dataset.csv"
+    Path(__file__).resolve().parent.parent
+    / "data"
+    / "olist"
+    / "olist_geolocation_dataset.csv"
 )
 
 pytestmark = pytest.mark.skipif(
@@ -22,7 +25,9 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def cities() -> pd.Series:
-    return pd.read_csv(GEOLOCATION_CSV, usecols=["geolocation_city"])["geolocation_city"]
+    return pd.read_csv(GEOLOCATION_CSV, usecols=["geolocation_city"])[
+        "geolocation_city"
+    ]
 
 
 def test_variantes_sao_paulo_presentes(cities):

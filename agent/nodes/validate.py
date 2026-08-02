@@ -32,7 +32,12 @@ def validate(state: AgentState) -> dict:
     # nœud ne suppose jamais d'où il vient.
     if not anomalies:
         return {
-            "validation": {"status": VALIDATION_OK, "metric": None, "before": None, "after": None},
+            "validation": {
+                "status": VALIDATION_OK,
+                "metric": None,
+                "before": None,
+                "after": None,
+            },
             "logs": [log_entry("validate", "rien à vérifier")],
         }
 

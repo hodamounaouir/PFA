@@ -41,7 +41,7 @@ Changer de dataset = écrire un nouveau `datasets/<nom>.yaml` et refaire le benc
 | 0 | Fondations & accès | 3–5 j | ✅ terminé le 2026-07-21 |
 | 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ✅ terminé le 2026-07-21 |
 | 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | ✅ terminé le 2026-07-27 |
-| 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | ⬜ ⬅️ **prochaine** |
+| 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | 🚧 **en cours** (3.1 ✅ · 3.2 ✅ · 3.4 ✅ · reste 3.3, ADR 010, PNG) |
 | 4 | Socle générique + agent réel + `INCIDENTS` | 3 sem | ⬜ |
 | 5 | HITL complet : pause, reprise, Apply borné | 1–2 sem | ⬜ |
 | 6 | Observabilité & validation Streamlit | 1–2 sem | ⬜ |
@@ -283,13 +283,34 @@ au même titre que « aucun chemin n'atteint `apply` sans approbation » — et 
       bout)*
 - [ ] Export PNG du graphe (`draw_mermaid_png()`) → `docs/img/agent_graph.png` (README + soutenance)
 
-### 3.2 Pause & reprise (le mécanisme critique)
-- [ ] Checkpointer `SqliteSaver` branché à la compilation
-- [ ] `propose` appelle `interrupt()` avec la proposition (stub) comme payload
-- [ ] Script CLI `scripts/decide.py <thread_id> approve|reject|amend` : injecte la décision
+### 3.2 Pause & reprise (le mécanisme critique) ✅
+- [x] Checkpointer `SqliteSaver` branché à la compilation
+      *(`agent_persistant()` dans `graph.py` — une seule façon d'ouvrir le graphe persistant, donc une
+      seule façon de se tromper de base de checkpoints. Plus `thread(id)` et `proposition_en_attente()`,
+      qui isolent les conventions LangGraph au lieu de les disséminer)*
+- [x] `propose` appelle `interrupt()` avec la proposition comme payload
+      *(conséquence assumée : `propose` n'est plus appelable hors d'un graphe — un nœud dont la raison
+      d'être est de suspendre n'a pas de sens isolé. Les parties pures ont été extraites dans
+      `build_proposal()` et `lire_reponse()`. **Aucun contournement**, pas même pour les tests (R3).
+      Vérifié : sans checkpointer le run est **bloqué** sur `propose`, jamais « passe outre » — donc
+      `apply` reste inatteignable même en oubliant la persistance)*
+- [x] Script CLI `scripts/decide.py <thread_id> approve|reject|amend` : injecte la décision
       (`Command(resume=...)`) → le graphe reprend
-- [ ] **Test clé** : lancer un run → interruption → **tuer le process** → relancer → la décision reprend
+      *(sans verbe : affiche la proposition en attente. `--by` trace le décideur, `--fix` porte la
+      correction réécrite par l'humain — refusé sur `reject`/`amend`, qui n'écrivent rien dans les
+      données. Invoqué en `-m scripts.decide`, comme `data.replay` et `benchmarks.archive_baseline`)*
+- [x] **Test clé** : lancer un run → interruption → **tuer le process** → relancer → la décision reprend
       le graphe exactement après `propose`
+      *(le run est lancé par un vrai `subprocess` qu'on laisse mourir ; seul le fichier de checkpoints
+      est partagé. Fait deux fois : en direct, et via `scripts/decide.py` — le chemin réel. Plus :
+      un run en pause n'écrit rien, et deux `thread_id` simultanés ne se mélangent pas)*
+- [x] **Vérification par mutation** — trois sabotages, tous détectés : `propose` ne s'interrompt plus →
+      échecs sur les 4 chemins et P3 · la décision humaine est ignorée → 12 échecs · le checkpointer est
+      neutralisé → 46 échecs.
+- ⚠️ **Limite rencontrée** : `Command(resume=None)` lève un `UnboundLocalError` **dans LangGraph 1.2.9**
+      (`_loop.py`, `resume_is_map` référencé avant affectation). Le cas « aucune décision » n'est donc
+      pas injectable au niveau du graphe ; il est couvert au niveau unitaire (`lire_reponse(None)`,
+      `route_after_propose`). À re-tester lors d'une future montée de version.
 - [ ] Note de conception : **un seul mécanisme d'interruption, trois usages** (corriger / amender /
       refuser) — et il resservira tel quel pour la validation des contrats en phase 4
 
@@ -323,8 +344,7 @@ au même titre que « aucun chemin n'atteint `apply` sans approbation » — et 
       `propose` approuve tout → 57 échecs · `amend` recâblé vers `apply` → 6 échecs dont les deux
       tests P3 dédiés · `validate` branché sur `END` → 3 échecs dont le test de sortie unique.
       Un test qui ne peut pas échouer ne prouve rien.
-- [ ] Test pause/reprise après redémarrage du process ⬅️ *dépend du checkpointer (3.2), fera partie
-      de cette étape-là*
+- [x] Test pause/reprise après redémarrage du process *(fait avec l'étape 3.2, dont il dépendait)*
 
 **☑ Phase terminée quand** : les 4 chemins passent en test ; la reprise post-redémarrage marche ; les
 tests de preuve P3 et « sortie unique » passent ; le PNG du graphe est généré.

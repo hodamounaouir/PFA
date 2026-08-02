@@ -20,7 +20,7 @@ from agent.nodes import amend, apply, detect, diagnose, log, profile, propose, v
 from agent.nodes.amend import _version_suivante
 from agent.nodes.validate import VALIDATION_OK
 from agent.nodes.detect import STUB_NULL_THRESHOLD
-from agent.nodes.propose import build_proposal
+from agent.nodes.propose import build_proposal, lire_reponse
 from agent.state import (
     DECISION_AMEND,
     DECISION_APPROVED,
@@ -44,7 +44,9 @@ SCHEMA_RH = [
 
 
 def base_state(schema=None, table="RAW.ORDERS"):
-    state = new_state(dataset="olist", layer="bronze", table=table, batch_id="2018-04-29")
+    state = new_state(
+        dataset="olist", layer="bronze", table=table, batch_id="2018-04-29"
+    )
     state["schema_history"] = schema or []
     return state
 
@@ -113,7 +115,10 @@ def etat_avec_profil(colonnes: dict, table="RAW.ORDERS"):
 def test_detect_ne_signale_rien_quand_tout_est_propre():
     """Le chemin « rien d'anormal » doit exister : c'est un des 4 du graphe."""
     state = etat_avec_profil(
-        {"a": {"null_rate": 0.0, "distinct": 351}, "b": {"null_rate": 0.02, "distinct": 12}}
+        {
+            "a": {"null_rate": 0.0, "distinct": 351},
+            "b": {"null_rate": 0.02, "distinct": 12},
+        }
     )
     assert detect(state)["anomalies"] == []
 
@@ -139,7 +144,15 @@ def test_detect_produit_un_fait_chiffre_pas_un_jugement():
     state = etat_avec_profil({"trouee": {"null_rate": 0.301, "distinct": 245}})
     ecart = detect(state)["anomalies"][0]
 
-    assert set(ecart) == {"famille", "table", "colonne", "type", "observe", "reference", "dama"}
+    assert set(ecart) == {
+        "famille",
+        "table",
+        "colonne",
+        "type",
+        "observe",
+        "reference",
+        "dama",
+    }
     assert ecart["observe"] == 0.301
     assert ecart["reference"] == STUB_NULL_THRESHOLD
     assert ecart["table"] == "RAW.ORDERS"
@@ -148,7 +161,9 @@ def test_detect_produit_un_fait_chiffre_pas_un_jugement():
 def test_detect_marche_sur_n_importe_quel_dataset():
     """Aucun nom de colonne n'est connu d'avance : l'écart est trouvé, pas su."""
     rh = detect(etat_avec_profil({"salaire_brut": {"null_rate": 0.4}}, "HR.EMPLOYES"))
-    capteurs = detect(etat_avec_profil({"temperature_c": {"null_rate": 0.4}}, "IOT.MESURES"))
+    capteurs = detect(
+        etat_avec_profil({"temperature_c": {"null_rate": 0.4}}, "IOT.MESURES")
+    )
 
     assert rh["anomalies"][0]["colonne"] == "salaire_brut"
     assert capteurs["anomalies"][0]["colonne"] == "temperature_c"
@@ -308,13 +323,60 @@ def test_la_proposition_affiche_toujours_un_impact():
     assert proposal["impact"]  # non vide (réel en phase 5.1)
 
 
-def test_propose_ne_decide_rien():
-    """LA garantie du projet : la décision vient de l'extérieur, jamais de l'agent."""
-    state = etat_diagnostique()
-    result = propose(state)
+def test_propose_ne_sappelle_pas_hors_du_graphe():
+    """Depuis l'étape 3.2, `propose` appelle `interrupt()` : il ne peut plus
+    s'exécuter sans checkpointer, et c'est **voulu**. Un nœud dont la raison
+    d'être est de suspendre n'a pas de sens isolé, et aucun contournement n'est
+    prévu — pas même pour les tests (règle R3). S'il existait un chemin où
+    `propose` ne s'arrête pas, la garantie du projet ne serait plus vérifiable.
 
-    assert "human_decision" not in result
-    assert state["human_decision"] is None
+    Ce qui se testait ici se teste désormais au niveau du graphe
+    (`test_agent_graph.py`), c'est-à-dire là où la pause existe vraiment.
+    """
+    with pytest.raises(Exception):
+        propose(etat_diagnostique())
+
+
+# `lire_reponse` est la partie pure de `propose` : traduire ce qu'a répondu
+# l'humain en champs d'état. Testable seule, elle, et c'est elle qui décide de ce
+# qui est une décision recevable.
+
+
+def test_lire_reponse_accepte_une_simple_chaine():
+    """Le cas courant en ligne de commande."""
+    assert lire_reponse(DECISION_APPROVED)["human_decision"] == DECISION_APPROVED
+
+
+def test_lire_reponse_accepte_un_dictionnaire_complet():
+    lu = lire_reponse(
+        {
+            "decision": DECISION_APPROVED,
+            "decided_by": "hoda",
+            "fix_override": "UPDATE …",
+        }
+    )
+    assert lu == {
+        "human_decision": DECISION_APPROVED,
+        "decided_by": "hoda",
+        "fix_override": "UPDATE …",
+    }
+
+
+@pytest.mark.parametrize("reponse", [None, 42, [], object(), {"decision": 1}])
+def test_lire_reponse_traite_l_inattendu_comme_une_absence_de_decision(reponse):
+    """On ne devine pas ce que l'humain a voulu dire. Sans décision lisible, le
+    run repartira vers `log` sans rien écrire."""
+    assert lire_reponse(reponse)["human_decision"] is None
+
+
+@pytest.mark.parametrize(
+    "approximation", ["Approved", "APPROVED", " approved", "approuvé"]
+)
+def test_lire_reponse_ne_rattrape_pas_une_decision_approximative(approximation):
+    """Ni casse ni espaces normalisés : `route_after_propose` refusera ces
+    valeurs, et c'est le comportement voulu. Rattraper « Approved » serait
+    commode aujourd'hui et dangereux le jour où une UI enverra autre chose."""
+    assert lire_reponse(approximation)["human_decision"] != DECISION_APPROVED
 
 
 def test_propose_marche_sur_n_importe_quel_dataset():
@@ -331,19 +393,11 @@ def test_propose_supporte_un_diagnostic_absent():
     assert proposal["anomalies"]  # les faits, eux, sont toujours là
 
 
-def test_propose_ne_modifie_pas_l_etat_recu():
+def test_build_proposal_ne_modifie_pas_l_etat_recu():
     state = etat_diagnostique()
     avant = copy.deepcopy(state)
-    propose(state)
+    build_proposal(state)
     assert state == avant
-
-
-def test_propose_ecrit_une_ligne_de_journal_au_format_commun():
-    entry = propose(etat_diagnostique())["logs"][0]
-    assert entry["node"] == "propose"
-    assert entry["anomalies"] == 1
-    assert entry["antecedents"] == 0
-    assert set(log_entry("x", "y")) <= set(entry)
 
 
 # --- Nœud 5/8 : apply — le seul qui écrit dans les données -------------------

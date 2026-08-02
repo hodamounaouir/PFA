@@ -36,8 +36,10 @@ def _read(path) -> pd.DataFrame:
 
 
 def _source_orders_count(day: str) -> int:
-    orders = pd.read_csv(config.OLIST_DIR / config.CSV_BY_TABLE["orders"],
-                         usecols=["order_id", "order_purchase_timestamp"])
+    orders = pd.read_csv(
+        config.OLIST_DIR / config.CSV_BY_TABLE["orders"],
+        usecols=["order_id", "order_purchase_timestamp"],
+    )
     days = pd.to_datetime(orders["order_purchase_timestamp"]).dt.date
     return int((days == date.fromisoformat(day)).sum())
 

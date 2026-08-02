@@ -23,7 +23,9 @@ from typing import Annotated, Optional, TypedDict
 # faute de frappe dans un "approved" écrit à la main ouvrirait un trou.
 DECISION_APPROVED = "approved"  # la donnée est fausse → apply corrige
 DECISION_AMEND = "amend_contract"  # la donnée est juste → amend met à jour le contrat
-DECISION_REJECTED = "rejected"  # rien à faire → log seul (faux positif classé sans suite)
+DECISION_REJECTED = (
+    "rejected"  # rien à faire → log seul (faux positif classé sans suite)
+)
 
 DECISIONS = frozenset({DECISION_APPROVED, DECISION_AMEND, DECISION_REJECTED})
 
@@ -39,7 +41,9 @@ class AgentState(TypedDict):
 
     # --- Références : ce à quoi on compare (chargé au début du run) ---------
     contract: dict  # contracts/<table>.yaml — « ce qui devrait être vrai »
-    contract_version: Optional[str]  # ex. "v1" ; None si la table n'a pas encore de contrat
+    contract_version: Optional[
+        str
+    ]  # ex. "v1" ; None si la table n'a pas encore de contrat
     schema_history: list  # OPS._SCHEMA_HISTORY — le dernier schéma connu
 
     # --- Profile : le batch résumé en agrégats ------------------------------
@@ -52,7 +56,9 @@ class AgentState(TypedDict):
     past_incidents: list
 
     # --- Diagnose : le seul nœud qui appelle le LLM -------------------------
-    diagnosis: Optional[dict]  # {root_cause, proposed_fix, explanation} ou None si parsing KO
+    diagnosis: Optional[
+        dict
+    ]  # {root_cause, proposed_fix, explanation} ou None si parsing KO
 
     # --- Propose : la pause HITL --------------------------------------------
     human_decision: Optional[str]  # une valeur de DECISIONS, ou None tant qu'on attend

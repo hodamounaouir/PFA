@@ -34,6 +34,10 @@ Les nœuds restent des stubs jusqu'à la phase 4 — ce qu'on valide ici, c'est 
 tuyauterie, pas l'intelligence.
 """
 
+from contextlib import contextmanager
+from pathlib import Path
+
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from agent.nodes import amend, apply, detect, diagnose, log, profile, propose, validate
@@ -182,10 +186,56 @@ def build_graph() -> StateGraph:
 def build_agent(checkpointer=None):
     """Le graphe compilé, prêt à `invoke()`.
 
-    `checkpointer` reste à None en phase 3.1 : le graphe traverse alors ses
-    quatre chemins d'une traite, ce qui suffit à les tester. À l'étape 3.2 on
-    passera un `SqliteSaver` — c'est lui qui rend `interrupt()` possible, en
-    persistant l'état pendant que le graphe attend une décision humaine qui peut
-    arriver des jours plus tard, depuis un autre process.
+    Sans `checkpointer`, le graphe est compilable et inspectable — c'est ce dont
+    se servent les tests de topologie — mais il ne peut pas aller **au bout** :
+    il s'arrête sur `propose` et n'a nulle part où sauvegarder son état, donc
+    aucune décision ne peut le relancer. Pour un run réel, `agent_persistant()`.
     """
     return build_graph().compile(checkpointer=checkpointer)
+
+
+# --- Persistance : ce qui rend la pause réelle ------------------------------
+# Sans elle, `interrupt()` ne serait qu'un `return` déguisé. C'est le
+# checkpointer qui transforme « le graphe s'arrête » en « le graphe attend » :
+# l'état est écrit sur disque, le process peut mourir, la machine redémarrer.
+
+CHECKPOINT_DB = Path(__file__).resolve().parent.parent / "agent_checkpoints.sqlite"
+
+
+@contextmanager
+def agent_persistant(db=CHECKPOINT_DB):
+    """Le graphe avec sa mémoire sur disque — la forme utilisable en vrai.
+
+    Utilisé par `scripts/decide.py`, par les tests de reprise, et plus tard par
+    Airflow (4.5) et Streamlit (6). Une seule façon d'ouvrir le graphe persistant,
+    donc une seule façon de se tromper de base de checkpoints.
+
+    `db` accepte `":memory:"` pour un run jetable — mais une base en mémoire meurt
+    avec le process, ce qui fait perdre l'intérêt de la pause : à n'utiliser que
+    pour tester un aller-retour dans un même process.
+    """
+    with SqliteSaver.from_conn_string(str(db)) as saver:
+        yield build_graph().compile(checkpointer=saver)
+
+
+def thread(thread_id: str) -> dict:
+    """La config qui identifie un run.
+
+    Le `thread_id` est ce qui permet de retrouver une proposition en attente
+    depuis un autre process — c'est l'identifiant que `scripts/decide.py` reçoit
+    en argument, et que Streamlit affichera en phase 6.
+    """
+    return {"configurable": {"thread_id": thread_id}}
+
+
+def proposition_en_attente(resultat) -> dict | None:
+    """La proposition soumise à l'humain, ou None si le run est allé au bout.
+
+    LangGraph signale une interruption par une clé `__interrupt__` dans le
+    résultat. On isole cette convention ici plutôt que de la disséminer : le jour
+    où elle change, un seul endroit à corriger.
+    """
+    interruptions = (
+        resultat.get("__interrupt__") if isinstance(resultat, dict) else None
+    )
+    return interruptions[0].value if interruptions else None
