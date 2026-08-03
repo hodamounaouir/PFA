@@ -41,7 +41,7 @@ Changer de dataset = écrire un nouveau `datasets/<nom>.yaml` et refaire le benc
 | 0 | Fondations & accès | 3–5 j | ✅ terminé le 2026-07-21 |
 | 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ✅ terminé le 2026-07-21 |
 | 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | ✅ terminé le 2026-07-27 |
-| 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | 🚧 **en cours** (3.1 ✅ · 3.2 ✅ · 3.3 ✅ · 3.4 ✅ · reste ADR 010 + PNG) |
+| 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | 🚧 **en cours** (3.1 ✅ · 3.2 ✅ · 3.3 ✅ · 3.4 ✅ · reste l'ADR 010) |
 | 4 | Socle générique + agent réel + `INCIDENTS` | 3 sem | ⬜ |
 | 5 | HITL complet : pause, reprise, Apply borné | 1–2 sem | ⬜ |
 | 6 | Observabilité & validation Streamlit | 1–2 sem | ⬜ |
@@ -281,7 +281,13 @@ au même titre que « aucun chemin n'atteint `apply` sans approbation » — et 
       run au lieu de router au hasard. Défaut de `route_after_propose` = `log`, jamais `apply` : `None`,
       `rejected` et toute valeur inattendue retombent sur le journal. Les 4 chemins tournent de bout en
       bout)*
-- [ ] Export PNG du graphe (`draw_mermaid_png()`) → `docs/img/agent_graph.png` (README + soutenance)
+- [x] Export PNG du graphe (`draw_mermaid_png()`) → `docs/img/agent_graph.png` (README + soutenance)
+      *(fait via `scripts/export_graph.py`, **régénérable d'une commande** plutôt que produit une fois
+      à la main : un diagramme extrait du code ne ment pas au moment où on le génère, mais il vieillit
+      dès que le câblage change. Deux sorties : `agent_graph.mmd` (hors ligne, rendu nativement par
+      GitHub, diffable) et `agent_graph.png` (rapport et diapos, rendu via mermaid.ink). Le mermaid
+      écrit à la main dans le README a été remplacé par l'image générée — c'était exactement le type
+      de doc qui a dérivé jusqu'à décrire un graphe à 7 nœuds.)*
 
 ### 3.2 Pause & reprise (le mécanisme critique) ✅
 - [x] Checkpointer `SqliteSaver` branché à la compilation

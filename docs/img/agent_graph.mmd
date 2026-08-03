@@ -1,0 +1,31 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	profile(profile)
+	detect(detect)
+	diagnose(diagnose)
+	propose(propose)
+	apply(apply)
+	amend(amend)
+	validate(validate)
+	log(log)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> profile;
+	amend --> log;
+	apply --> validate;
+	detect -. &nbsp;anomalies&nbsp; .-> diagnose;
+	detect -. &nbsp;rien d'anormal&nbsp; .-> log;
+	diagnose --> propose;
+	profile --> detect;
+	propose -. &nbsp;amend_contract&nbsp; .-> amend;
+	propose -. &nbsp;approved&nbsp; .-> apply;
+	propose -. &nbsp;rejected&nbsp; .-> log;
+	validate --> log;
+	log --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

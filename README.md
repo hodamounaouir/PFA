@@ -104,22 +104,21 @@ graph TB
 Le graphe de l'agent — **8 nœuds**, et **toute correction exige une validation humaine** (aucune action
 autonome) :
 
-```mermaid
-graph LR
-    START([START]) --> P[Profile]
-    P --> D[Detect]
-    D -->|"rien d'anormal"| L[Log]
-    D -->|anomalie| DG["Diagnose<br/>(LLM + lineage dbt<br/>+ incidents passés)"]
-    DG --> PR["Propose<br/>⏸ attente validation<br/>humaine (Streamlit)"]
-    PR -->|"✅ approved<br/>la donnée est fausse"| AP[Apply]
-    PR -->|"📝 amend_contract<br/>la règle a vieilli"| AM["Amend<br/>contrat v1 → v2<br/>(aucune écriture<br/>sur les données)"]
-    PR -->|"❌ rejected"| L
-    AP --> V[Validate]
-    AM --> L
-    V -->|"échec → traitement manuel"| L
-    V -->|succès| L
-    L --> END([END])
-```
+<img src="docs/img/agent_graph.png" alt="Le graphe de l'agent" width="330">
+
+> Ce schéma est **extrait du graphe compilé**, pas dessiné à la main :
+> `uv run python -m scripts.export_graph` le régénère depuis le code. Il ne peut donc pas décrire un
+> agent qui n'existe plus. Les flèches en pointillés sont les branches conditionnelles ; leur libellé
+> est le vocabulaire exact qu'emploient `INCIDENTS` et `scripts/decide.py`.
+
+Les trois issues de `Propose` — c'est la distinction entre les deux « non » qui empêche le contrat de
+vieillir :
+
+| Décision | Ce que ça veut dire | Effet |
+|---|---|---|
+| ✅ `approved` | la donnée est fausse | `Apply` corrige **les données** |
+| 📝 `amend_contract` | la donnée est juste, la règle a vieilli | `Amend` passe le contrat en v2 — **aucune écriture** sur les données |
+| ❌ `rejected` | cas isolé, rien à changer | `Log` seul ; la signature est mise en silence |
 
 **Propriétés clés** — toutes **structurelles**, pas déclaratives :
 
