@@ -406,6 +406,10 @@ CYCLE B — SURVEILLANCE  (le graphe 8 nœuds de la phase 3, à chaque batch, da
 ### 4.0 Socle générique — ce qui rend l'agent interchangeable ⬅️ *nouveau*
 - [ ] `agent/connectors/base.py` : interface commune — `list_tables()`, `get_schema(table)`,
       `profile(table, batch_filter)`. **Aucun SQL Snowflake au-dessus de cette couche.**
+- [ ] **Une table déclarée mais absente ne doit pas faire lever le connecteur** : il retourne
+      l'information, il ne trébuche pas. C'est ce qui permet à la famille *inventaire* de 4.3 de la
+      traiter comme une **anomalie constatée** plutôt que comme un plantage. Un agent qui casse quand
+      la donnée manque ne détecte rien — il disparaît au moment où on a le plus besoin de lui.
 - [ ] `agent/connectors/snowflake.py` : la première implémentation (les autres viendront : Postgres,
       REST/FastAPI de l'objectif O1, CSV)
 - [ ] `datasets/olist.yaml` : le **registre** — connecteur, tables à surveiller, `batch_column`, couche.
@@ -458,7 +462,19 @@ CYCLE B — SURVEILLANCE  (le graphe 8 nœuds de la phase 3, à chaque batch, da
 ### 4.3 Profile & Detect réels
 - [ ] `profile` : appelle `profile_table` + **persiste le profil du jour** dans `OPS._PROFILES`
       (ordre impératif : lire l'historique **avant** d'y écrire le profil du jour)
-- [ ] `detect` — **quatre familles**, toutes déterministes, toutes génériques :
+- [ ] `detect` — **cinq familles**, toutes déterministes, toutes génériques :
+  - [ ] **inventaire** ⬅️ *ajouté le 2026-08-03* : la liste des tables **déclarées** dans
+        `datasets/<dataset>.yaml` confrontée à celles **réellement présentes** (`list_tables()`).
+        C'est la seule famille qui s'exerce **avant** de profiler quoi que ce soit — et la seule qui
+        puisse constater qu'il n'y a rien à profiler. Trois écarts à produire :
+    - [ ] **table déclarée absente** — l'incident le plus grave qui puisse arriver. Sans cette famille,
+          le connecteur lèverait et le run planterait : personne ne saurait *pourquoi*, et l'anomalie
+          serait masquée par un bug apparent. L'agent doit la **constater**, pas trébucher dessus.
+    - [ ] **table nouvelle non déclarée** — elle n'est pas surveillée, et personne ne le sait
+    - [ ] **hypothèse de renommage** : une table déclarée a disparu **et** une table nouvelle porte un
+          schéma identique. `detect` n'énonce que le fait (« A absente, B nouvelle, schémas
+          identiques ») ; c'est `diagnose` qui formule « probablement un renommage », et l'humain qui
+          tranche. Répartition habituelle : le code constate, le LLM suppose, l'humain décide.
   - [ ] dérive de **schéma** : diff du schéma du jour vs `_SCHEMA_HISTORY` + contrat
   - [ ] **violation de contrat** ⬅️ *nouveau* : confrontation aux clauses du YAML (bornes, unicité,
         nulls interdits, valeurs acceptées, cohérence normalisée)
@@ -466,6 +482,12 @@ CYCLE B — SURVEILLANCE  (le graphe 8 nœuds de la phase 3, à chaque batch, da
   - [ ] **collisions sémantiques** : normalisation (casse/accents/espaces) des top-K valeurs de
         **toute colonne classée catégorielle** → clusters de collision (attrape `sao paulo`/`são paulo`)
   - [ ] intégration des **échecs dbt test** du run comme anomalies déjà confirmées
+- [ ] ⚠️ **Question ouverte, à trancher en 4.3** : quelle issue pour « le **registre** a vieilli » ?
+      Une table renommée n'est ni une donnée fausse (`approved`), ni un contrat périmé
+      (`amend_contract`), ni un cas isolé (`rejected`) — c'est `datasets/<dataset>.yaml` qui ne décrit
+      plus la réalité. Deux options : élargir `amend_contract` (même idée : « ce que j'ai déclaré est
+      faux, pas la donnée »), ou ajouter une 4ᵉ issue. Trancher **avant** d'écrire `detect`, et
+      consigner dans l'ADR 010.
 - [ ] **Statistiques robustes** : médiane + MAD plutôt que moyenne + écart-type — sinon l'anomalie du J60
       entre dans l'historique, gonfle σ, et la récidive du J85 paraît *moins* grave (contamination de
       la référence). Plancher sur σ pour le cas « historique parfaitement constant » (0 % de nulls
@@ -516,6 +538,7 @@ CYCLE B — SURVEILLANCE  (le graphe 8 nœuds de la phase 3, à chaque batch, da
   | `truncate_j80` | statistique | historique des volumes |
   | `nulls_j85` | idem J60 **+ mémoire** citant J60 | historique + `INCIDENTS` |
   | `semantic_sao_paulo` ⭐ | sémantique | le batch avec lui-même |
+  | *(hors ground truth)* table absente ou renommée | **inventaire** | le registre `datasets/*.yaml` |
 
 **☑ Phase terminée quand** : le socle tourne sur un second dataset sans modification de code ; les
 contrats sont générés et validés ; l'agent tourne dans le DAG sur les 3 couches ; il détecte les 4

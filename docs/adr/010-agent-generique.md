@@ -230,6 +230,32 @@ renvoyer `cause` au lieu de `root_cause`, ou omettre un champ).
 
 ---
 
+## Question ouverte — l'amendement du registre (soulevée le 2026-08-03)
+
+Le registre `datasets/<dataset>.yaml` déclare les tables à surveiller. Il peut donc, lui aussi,
+**cesser de décrire la réalité** : une table renommée, supprimée, ou ajoutée sans être déclarée.
+
+Conséquence immédiate, traitée : une cinquième famille de détection — *inventaire* — est ajoutée à
+l'étape 4.3. Elle confronte les tables déclarées à celles réellement présentes. C'est la seule famille
+qui s'exerce **avant** de profiler, et la seule qui puisse constater qu'il n'y a rien à profiler. Sans
+elle, une table disparue ferait lever le connecteur : l'incident le plus grave possible serait masqué
+par ce qui ressemblerait à un bug.
+
+Conséquence non tranchée : **quelle issue de `Propose` pour « le registre a vieilli » ?** Ce n'est ni
+une donnée fausse (`approved`), ni un contrat périmé (`amend_contract`), ni un cas isolé (`rejected`).
+
+Deux options :
+
+- **élargir `amend_contract`** — c'est la même idée (« ce que j'ai déclaré est faux, pas la donnée »),
+  au prix d'une issue qui recouvre deux fichiers différents ;
+- **ajouter une 4ᵉ issue** — plus explicite, au prix d'un nœud de plus et d'une décision de plus à
+  expliquer à l'humain.
+
+À trancher **avant** d'écrire `detect` (4.3), et à consigner ici.
+
+Note de méthode : cette lacune a été trouvée en expliquant le plan, pas en l'écrivant. C'est un
+argument pour continuer à faire relire les phases avant de les commencer.
+
 ## Conséquences
 
 ### Sur le calendrier
