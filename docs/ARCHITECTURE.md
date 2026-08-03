@@ -59,6 +59,8 @@ refusée, quelle que soit sa valeur par ailleurs.
    │            AGENT QUALITÉ (LangGraph)              │
    │                                                   │
    │  Profile ► Detect ► Diagnose(LLM) ► Propose ⏸     │
+   │                       ▲     │                     │
+   │            (question) └─────┘                     │
    │                       ► Apply ► Validate ► Log    │
    │                       └─ ou ► Amend ► Log         │
    │                                                   │
@@ -189,7 +191,7 @@ Huit nodes, câblés dans [`agent/graph.py`](../agent/graph.py).
 | `Profile` | ❌ | Statistiques agrégées via `profile_table` ; persiste dans `_profiles` |
 | `Detect` | ❌ | Dérive de schéma (diff) + **violation de contrat** + dérives statistiques (médiane/MAD vs historique) + collisions sémantiques + échecs dbt test |
 | `Diagnose` | ✅ | **Le seul appel LLM.** Stats + métadonnées + lineage dbt + incidents passés → diagnostic structuré (cause, correction proposée, explication) |
-| `Propose` | ❌ | `interrupt()` — met le graphe en pause, attend la décision humaine (Streamlit). **3 issues** : `approved`, `amend_contract`, `rejected` |
+| `Propose` | ❌ | `interrupt()` — met le graphe en pause, attend la décision humaine (Streamlit). **3 issues** : `approved`, `amend_contract`, `rejected` — plus `question`, qui ne décide rien et renvoie à `Diagnose` |
 | `Apply` | ❌ | Écrit dans les **données** — uniquement si `human_decision == "approved"`, en transaction, table diagnostiquée seulement |
 | `Amend` | ❌ | Écrit dans le **contrat** (v1 → v2) — la donnée était juste, c'est la règle qui a vieilli. **N'écrit rien dans les données** |
 | `Validate` | ❌ | Re-profile la table : l'anomalie a-t-elle disparu ? Échec → « à traiter manuellement » |
@@ -209,7 +211,7 @@ Ce sont les deux seules décisions de parcours du graphe, et elles sont du code 
 | Arête | Fonction | Branches |
 |-------|----------|----------|
 | après `Detect` | `route_after_detect` | `anomalies` → `Diagnose` · `rien d'anormal` → `Log` |
-| après `Propose` | `route_after_propose` | `approved` → `Apply` · `amend_contract` → `Amend` · `rejected` → `Log` · `sans décision` → `Log` |
+| après `Propose` | `route_after_propose` | `approved` → `Apply` · `amend_contract` → `Amend` · `rejected` → `Log` · **`question` → `Diagnose`** · `sans décision` → `Log` |
 
 Le défaut de `route_after_propose` est **`Log`, jamais `Apply`** : une décision absente, mal orthographiée
 ou inventée par un client mal écrit retombe sur le journal. Un run qui finit à tort en « rien fait » se
@@ -256,6 +258,7 @@ contrat de vieillir :
 | `approved` | la donnée est fausse | `Apply` corrige les données |
 | `amend_contract` | *« c'est normal et ça le restera »* — la donnée est juste, la règle a vieilli | `Amend` passe le contrat en v2 ; **aucune écriture sur les données** |
 | `rejected` | *« exceptionnel, rien à changer »* | `Log` seul ; la signature est mise en silence, la règle est conservée |
+| `question` | *« explique-moi avant que je tranche »* | **ce n'est pas une décision** : retour à `Diagnose`, réponse, puis la proposition attend de nouveau |
 
 Confondre les deux ferait soit vieillir le contrat (il crie à chaque évolution normale du métier,
 l'équipe s'habitue à ignorer les alertes, l'agent meurt), soit rendre l'agent aveugle (une règle

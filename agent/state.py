@@ -29,6 +29,19 @@ DECISION_REJECTED = (
 
 DECISIONS = frozenset({DECISION_APPROVED, DECISION_AMEND, DECISION_REJECTED})
 
+# --- Demander avant de décider ----------------------------------------------
+# `question` n'est **pas** une décision, et c'est pour ça qu'elle ne figure pas
+# dans `DECISIONS` : elle ne clôt rien, elle diffère. Un humain à qui on ne laisse
+# que trois boutons approuve vite et mal — c'est la faiblesse connue du HITL
+# (« et si l'humain approuve sans lire ? », §5.3 de DESIGN.md). Pouvoir demander
+# « pourquoi ? » avant de trancher est ce qui rend l'approbation informée.
+#
+# La décision finale reste malgré tout l'un des trois mots ci-dessus : c'est elle
+# qui route le graphe, qui est enregistrée dans INCIDENTS, et qui sert à calculer
+# la précision au benchmark. Si elle devenait du texte libre, l'aiguillage devrait
+# *interpréter* ce que l'humain a voulu dire — exactement ce qu'on s'interdit.
+DEMANDE_QUESTION = "question"
+
 
 class AgentState(TypedDict):
     """L'état qui circule de START à END, une instance par batch analysé."""
@@ -64,6 +77,15 @@ class AgentState(TypedDict):
     human_decision: Optional[str]  # une valeur de DECISIONS, ou None tant qu'on attend
     decided_by: Optional[str]  # qui a tranché (rempli en phase 5, tracé dans INCIDENTS)
     decided_at: Optional[str]  # quand (ISO 8601)
+
+    # --- Le dialogue avant la décision --------------------------------------
+    # Même réducteur que `logs` : les échanges s'accumulent au lieu de s'écraser.
+    # C'est ce qui permet de montrer, dans INCIDENTS puis dans Streamlit, non pas
+    # « l'humain a approuvé » mais « l'humain a posé deux questions, obtenu ces
+    # réponses, **puis** approuvé ». Bien meilleure réponse à « et s'il approuve
+    # sans lire ? » qu'un simple taux d'approbation.
+    # Forme d'une entrée : {"role": "humain" | "agent", "message": str, "ts": str}
+    conversation: Annotated[list, add]
 
     # --- Apply : quelle correction a réellement été exécutée ? ---------------
     # L'humain peut approuver *sa propre* correction plutôt que celle proposée.
@@ -109,8 +131,22 @@ def new_state(dataset: str, layer: str, table: str, batch_id: str) -> AgentState
         fix_override=None,
         applied_fix=None,
         validation=None,
+        conversation=[],
         logs=[],
     )
+
+
+def echange(role: str, message: str) -> dict:
+    """Une réplique du dialogue, à retourner dans `{"conversation": [ ... ]}`.
+
+    `role` vaut `"humain"` ou `"agent"`. Même principe que `log_entry` : le nœud
+    retourne une liste d'une seule entrée, le réducteur concatène.
+    """
+    return {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "role": role,
+        "message": message,
+    }
 
 
 def log_entry(node: str, message: str, **extra) -> dict:

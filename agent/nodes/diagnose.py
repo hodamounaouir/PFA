@@ -27,8 +27,8 @@ Enrichi en phase 4.4 : le contexte recevra aussi `past_incidents` renseignés,
 la mémoire, qui permet de citer un incident identique déjà tranché (objectif O7).
 """
 
-from agent.llm import MODELE, diagnostiquer
-from agent.state import AgentState, log_entry
+from agent.llm import MODELE, diagnostiquer, repondre
+from agent.state import AgentState, echange, log_entry
 
 
 def construire_contexte(state: AgentState) -> dict:
@@ -50,10 +50,74 @@ def construire_contexte(state: AgentState) -> dict:
         "ecarts_constates": state["anomalies"],
         "incidents_similaires_passes": state["past_incidents"],
         "contrat_version": state["contract_version"],
+        # le diagnostic déjà rendu, quand l'humain revient poser une question
+        "diagnostic_deja_rendu": state["diagnosis"],
+    }
+
+
+def question_en_attente(state: AgentState) -> str | None:
+    """La dernière réplique, si c'est l'humain qui a parlé et attend une réponse.
+
+    C'est ce qui distingue les deux modes du nœud : premier passage (personne n'a
+    encore rien dit → on diagnostique) ou retour depuis `propose` (l'humain a posé
+    une question → on y répond). Le nœud ne devine pas d'où il vient, il regarde
+    l'état.
+    """
+    conversation = state["conversation"]
+    if conversation and conversation[-1]["role"] == "humain":
+        return conversation[-1]["message"]
+    return None
+
+
+def _repondre_a_la_question(state: AgentState, question: str) -> dict:
+    """Mode « dialogue » : l'humain veut comprendre avant de trancher.
+
+    Le diagnostic **n'est pas retouché**. Une réponse à une question éclaire, elle
+    ne remplace pas le diagnostic initial — et surtout, si le LLM réécrivait son
+    diagnostic à chaque échange, la proposition changerait sous les yeux de
+    l'humain pendant qu'il réfléchit. La révision d'un diagnostic sur objection
+    est une autre fonctionnalité, à traiter en phase 5 si elle s'avère utile.
+    """
+    try:
+        reponse = repondre(
+            construire_contexte(state), state["conversation"][:-1], question
+        )
+    except Exception as exc:  # noqa: BLE001 — même mode dégradé que le diagnostic
+        reponse = (
+            "Je ne peux pas répondre pour le moment (le modèle est indisponible). "
+            "Les écarts constatés restent affichés : ils ne dépendent pas du modèle."
+        )
+        return {
+            "conversation": [echange("agent", reponse)],
+            "logs": [
+                log_entry(
+                    "diagnose",
+                    "réponse indisponible — l'écart reste consultable",
+                    erreur=f"{type(exc).__name__}: {exc}"[:200],
+                )
+            ],
+        }
+
+    return {
+        "conversation": [echange("agent", reponse)],
+        "logs": [
+            log_entry(
+                "diagnose",
+                "réponse à une question de l'humain",
+                echanges=len(state["conversation"]) + 1,
+                modele=MODELE,
+            )
+        ],
     }
 
 
 def diagnose(state: AgentState) -> dict:
+    # Deux modes. L'humain qui revient poser une question passe par ici aussi :
+    # c'est ce qui garde **un seul nœud** en contact avec le LLM (règle R1).
+    question = question_en_attente(state)
+    if question is not None:
+        return _repondre_a_la_question(state, question)
+
     anomalies = state["anomalies"]
 
     # Le graphe ne route pas ici sans écart, mais un nœud ne doit jamais

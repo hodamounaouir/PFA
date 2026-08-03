@@ -40,6 +40,13 @@ def pas_de_vrai_llm(monkeypatch):
     monkeypatch.setattr(
         diagnose_mod, "diagnostiquer", lambda contexte: DIAGNOSTIC_FACTICE
     )
+    # Second usage du modèle : répondre à une question de l'humain avant qu'il
+    # tranche. Même nœud, même règle — donc même simulation.
+    monkeypatch.setattr(
+        diagnose_mod,
+        "repondre",
+        lambda contexte, conversation, question: f"(réponse factice à : {question})",
+    )
 
 
 @pytest.fixture(autouse=True)

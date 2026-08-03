@@ -124,3 +124,52 @@ def diagnostiquer(contexte: dict) -> Diagnostic:
         ],
     )
     return Diagnostic.model_validate_json(reponse.choices[0].message.content)
+
+
+CONSIGNES_REPONSE = """Tu es un expert en qualité de données. Tu as déjà rendu un \
+diagnostic sur un lot de données, et la personne qui doit décider te pose une \
+question avant de trancher.
+
+Réponds à sa question, en français, en quelques phrases. Sois direct et concret.
+
+Trois limites à respecter :
+- Tu ne disposes que des informations qu'on te donne. Si la question demande une \
+donnée que tu n'as pas, dis-le franchement au lieu d'inventer un chiffre.
+- Tu ne décides pas à sa place. Tu éclaires, elle tranche.
+- La règle absolue tient toujours : ne propose JAMAIS de remplacer une valeur par \
+une valeur devinée."""
+
+
+def repondre(contexte: dict, conversation: list, question: str) -> str:
+    """Répond à une question de l'humain avant qu'il tranche. **Lève** en cas d'échec.
+
+    Deuxième et dernier usage du modèle dans tout le projet — et il reste appelé
+    depuis le **même nœud** (`diagnose`), ce qui préserve la règle R1 : un seul
+    endroit parle au LLM, donc un seul endroit à auditer et à simuler.
+
+    Sortie en **texte libre**, contrairement à `diagnostiquer()` : une réponse à
+    une question n'a pas de forme imposable. Le risque de format y est nul —
+    personne ne route le graphe sur ce texte, il est seulement affiché à l'humain
+    et journalisé.
+    """
+    historique = [
+        {
+            "role": "assistant" if e["role"] == "agent" else "user",
+            "content": e["message"],
+        }
+        for e in conversation
+    ]
+    reponse = _client().chat.completions.create(
+        model=MODELE,
+        temperature=TEMPERATURE,
+        messages=[
+            {"role": "system", "content": CONSIGNES_REPONSE},
+            {
+                "role": "user",
+                "content": json.dumps(contexte, ensure_ascii=False, indent=2),
+            },
+            *historique,
+            {"role": "user", "content": question},
+        ],
+    )
+    return reponse.choices[0].message.content.strip()

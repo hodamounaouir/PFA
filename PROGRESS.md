@@ -310,6 +310,21 @@ au même titre que « aucun chemin n'atteint `apply` sans approbation » — et 
       *(le run est lancé par un vrai `subprocess` qu'on laisse mourir ; seul le fichier de checkpoints
       est partagé. Fait deux fois : en direct, et via `scripts/decide.py` — le chemin réel. Plus :
       un run en pause n'écrit rien, et deux `thread_id` simultanés ne se mélangent pas)*
+- [x] **Dialogue avant décision** ⬅️ *ajouté le 2026-08-03, à la demande* : une **4ᵉ réponse**,
+      `question`, qui n'est **pas** une décision — elle diffère au lieu de clore. Le graphe repart vers
+      `diagnose`, la réponse revient, la proposition attend de nouveau. C'est la seule branche qui
+      **remonte** dans le graphe.
+      *Pourquoi renvoyer à `diagnose` plutôt que répondre dans `propose` : c'est ce qui préserve R1
+      (« le LLM n'est appelé que dans Diagnose »). Deux nœuds qui parlent au modèle, ce serait deux
+      endroits à auditer, à simuler et à surveiller.*
+      *Pourquoi c'est utile : un humain à qui on ne laisse que trois boutons approuve vite et mal.
+      C'est la faiblesse connue du HITL (§5.3 de `DESIGN.md`). Le dialogue est conservé dans l'état,
+      donc dans `INCIDENTS` — on pourra montrer « a posé deux questions, obtenu ces réponses, **puis**
+      approuvé » plutôt qu'un simple taux d'approbation.*
+      *Garde-fous : plafond de 10 échanges (sans lui, la boucle peut tourner sans fin si le modèle est
+      en panne) ; au-delà le run se clôt **sans décision**, rien n'est écrit. Une question vide n'en est
+      pas une. Et **discuter ne rapproche pas de l'écriture** : un test vérifie P3 après cinq questions.*
+      *CLI : `uv run python -m scripts.decide <run> ask "pourquoi … ?"`*
 - [x] **Vérification par mutation** — trois sabotages, tous détectés : `propose` ne s'interrompt plus →
       échecs sur les 4 chemins et P3 · la décision humaine est ignorée → 12 échecs · le checkpointer est
       neutralisé → 46 échecs.

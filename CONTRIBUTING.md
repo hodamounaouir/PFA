@@ -194,6 +194,7 @@ R1, et il faut l'encaisser.
 | Nodes déterministes | Test unitaire direct, état factice en entrée |
 | `Diagnose` | **LLM mocké** — on teste le parsing et la gestion d'erreur, pas le LLM |
 | Routage | Les 4 chemins du graphe : rien d'anormal / refusé / **amendé** / approuvé |
+| Dialogue | Une question renvoie à `Diagnose` et revient ; **P3 tient après une longue discussion** |
 | Pause & reprise | Une exécution interrompue sur `Propose` reprend après redémarrage du process |
 | `Apply` | Requête hors table diagnostiquée → rejet ; mot-clé destructeur → rejet ; valeur devinée → rejet |
 | `Amend` | Après `amend_contract`, aucune ligne de données n'a bougé ; seul le contrat change de version |

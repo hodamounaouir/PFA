@@ -431,6 +431,10 @@ def test_la_proposition_porte_de_quoi_decider():
         "impact",
         "past_incidents",
         "choix",
+        # ajoutés avec le dialogue : l'humain doit retrouver le fil même s'il
+        # revient le lendemain, depuis un autre poste
+        "conversation",
+        "questions_restantes",
     }
 
 
@@ -476,6 +480,7 @@ def test_lire_reponse_accepte_un_dictionnaire_complet():
         "human_decision": DECISION_APPROVED,
         "decided_by": "hoda",
         "fix_override": "UPDATE …",
+        "question": None,
     }
 
 

@@ -6,10 +6,10 @@ aucune logique métier : il **câble**, et le câblage est lui-même une garanti
     START ─► profile ─► detect ──(rien d'anormal)──────────────► log ─► END
                           │ (des écarts)
                           ▼
-                      diagnose
-                          │
-                          ▼
-                      propose  ⏸ décision humaine (interrupt, étape 3.2)
+                   ┌─► diagnose
+                   │      │
+        (question) │      ▼
+                   └── propose  ⏸ décision humaine (interrupt, étape 3.2)
                           │
                  ┌────────┼──────────────────┐
             (approved) (amend_contract)  (rejected / rien)
@@ -22,11 +22,17 @@ aucune logique métier : il **câble**, et le câblage est lui-même une garanti
                  │        │                  │
                  └────────┴──────────────────┴─► log ─► END
 
+La branche `question` est la seule qui **remonte** : l'humain demande à
+comprendre, `diagnose` lui répond, et on revient à la proposition — autant de fois
+qu'il le faut, dans la limite d'un plafond. Elle ne rapproche en rien de
+l'écriture.
+
 Deux propriétés se lisent directement sur ce dessin, et c'est tout l'intérêt de
 les avoir mises dans la **topologie** plutôt que dans du code défensif :
 
   - `apply` n'a qu'une seule arête entrante, et elle vient de `propose` par la
-    branche `approved` (test de preuve P3, étape 3.4) ;
+    branche `approved` (test de preuve P3, étape 3.4) — dix questions ne
+    l'ouvrent pas davantage qu'une ;
   - `log` est le seul nœud relié à END : aucun run ne peut se terminer sans
     laisser de trace (test « sortie unique », étape 3.4).
 
@@ -45,6 +51,7 @@ from agent.state import (
     DECISION_AMEND,
     DECISION_APPROVED,
     DECISION_REJECTED,
+    DEMANDE_QUESTION,
     AgentState,
 )
 
@@ -110,6 +117,10 @@ def route_after_propose(state: AgentState) -> str:
         return DECISION_AMEND
     if decision == DECISION_REJECTED:
         return DECISION_REJECTED
+    # `question` n'est pas une décision : elle renvoie à `diagnose` et le cycle
+    # recommence. C'est la seule branche du graphe qui **revient en arrière**.
+    if decision == DEMANDE_QUESTION:
+        return DEMANDE_QUESTION
     return BRANCHE_SANS_DECISION
 
 
@@ -151,13 +162,25 @@ def build_graph() -> StateGraph:
     # ne peut rien déclencher directement, il ne peut que soumettre.
     builder.add_edge("diagnose", "propose")
 
-    # Aiguillage 2 — les trois issues de la décision humaine, plus le cas « pas
-    # de décision ». Les deux dernières aboutissent au même nœud sans se
-    # confondre dans le code : `route_after_propose` distingue « l'humain a dit
-    # non » de « personne n'a répondu », et chacune est testable par son nom.
-    # (Le diagramme exporté, lui, n'en montre qu'une : LangGraph fusionne les
-    # arêtes de même origine et même destination, et ne garde que le premier
-    # libellé. Perte acceptable — c'est le graphe exécuté qui fait foi.)
+    # Aiguillage 2 — les trois issues de la décision humaine, la demande
+    # d'explication, et le cas « pas de décision ».
+    #
+    # `question` est la seule branche qui **remonte** dans le graphe : l'humain
+    # demande à comprendre, `diagnose` lui répond, et on revient ici. Elle ne
+    # rapproche en rien de l'écriture — discuter n'est pas approuver, et `apply`
+    # garde son unique arête entrante.
+    #
+    # Renvoyer vers `diagnose` plutôt que répondre sur place n'est pas un détour :
+    # c'est ce qui préserve la règle R1 (« le LLM n'est appelé que dans
+    # Diagnose »). Si `propose` répondait lui-même, deux nœuds parleraient au
+    # modèle, et il y aurait deux endroits à auditer, à simuler et à surveiller.
+    #
+    # Les deux dernières branches aboutissent au même nœud sans se confondre dans
+    # le code : `route_after_propose` distingue « l'humain a dit non » de
+    # « personne n'a répondu ». (Le diagramme exporté, lui, n'en montre qu'une :
+    # LangGraph fusionne les arêtes de même origine et même destination et ne
+    # garde que le premier libellé. Perte acceptable — c'est le graphe exécuté
+    # qui fait foi.)
     builder.add_conditional_edges(
         "propose",
         route_after_propose,
@@ -165,6 +188,7 @@ def build_graph() -> StateGraph:
             DECISION_APPROVED: "apply",
             DECISION_AMEND: "amend",
             DECISION_REJECTED: "log",
+            DEMANDE_QUESTION: "diagnose",
             BRANCHE_SANS_DECISION: "log",
         },
     )

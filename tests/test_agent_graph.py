@@ -33,6 +33,7 @@ Les deux dernières familles sont arrivées avec l'étape 3.2 :
      laisse mourir, puis repris depuis un autre, y compris par `scripts/decide.py`.
 """
 
+import importlib
 import os
 import subprocess
 import sys
@@ -54,15 +55,21 @@ from agent.graph import (
     route_after_propose,
     thread,
 )
+from agent.nodes.propose import MAX_ECHANGES
 from agent.state import (
     DECISION_AMEND,
     DECISION_APPROVED,
     DECISION_REJECTED,
+    DEMANDE_QUESTION,
     log_entry,
     new_state,
 )
 
 RACINE = Path(__file__).resolve().parent.parent
+
+# Même piège que dans `test_agent_nodes.py` : `agent.nodes.diagnose` désigne la
+# **fonction** réexportée, pas le module. On va chercher le module explicitement.
+diagnose_mod = importlib.import_module("agent.nodes.diagnose")
 
 # --- Deux profils de batch, construits sur le comportement du stub -----------
 # `profile` pose des nulls sur les colonnes de position 1, 5, 9… (position % 4 == 1).
@@ -393,6 +400,184 @@ def test_un_graphe_sans_checkpointer_reste_bloque_sur_propose():
     assert parcours(resultat) == ["profile", "detect", "diagnose"]
     assert "apply" not in parcours(resultat)
     assert resultat["human_decision"] is None
+
+
+# --- 4 bis. Le dialogue avant la décision ------------------------------------
+#
+# Un humain à qui on ne laisse que trois boutons approuve vite et mal. Pouvoir
+# demander « pourquoi ? » avant de trancher est ce qui rend l'approbation
+# informée — et c'est la meilleure réponse à la question de jury « et s'il
+# approuve sans lire ? ».
+#
+# Ce que ces tests doivent garantir avant tout : **discuter ne rapproche pas de
+# l'écriture**. On peut poser dix questions, `apply` reste inatteignable tant que
+# le mot exact n'a pas été prononcé.
+
+
+def dialoguer(app, config, *echanges):
+    """Enchaîne des questions puis une décision, comme le ferait `decide.py`."""
+    resultat = None
+    for e in echanges:
+        message = (
+            {"decision": DEMANDE_QUESTION, "question": e} if isinstance(e, str) else e
+        )
+        resultat = app.invoke(Command(resume=message), config)
+    return resultat
+
+
+def test_une_question_ramene_le_graphe_a_diagnose():
+    """La seule branche du graphe qui **remonte**."""
+    with agent_persistant(":memory:") as app:
+        config = thread("t")
+        app.invoke(etat(SCHEMA_AVEC_ECART), config)
+        resultat = dialoguer(app, config, "Pourquoi le job amont ?")
+
+    assert proposition_en_attente(resultat) is not None, "le graphe devait re-demander"
+    assert parcours(resultat) == [
+        "profile",
+        "detect",
+        "diagnose",
+        "propose",
+        "diagnose",  # ← la question est repassée par le nœud du LLM
+    ]
+
+
+def test_le_dialogue_saccumule_et_survit_aux_tours():
+    with agent_persistant(":memory:") as app:
+        config = thread("t")
+        app.invoke(etat(SCHEMA_AVEC_ECART), config)
+        resultat = dialoguer(app, config, "Première ?", "Deuxième ?")
+
+    conversation = proposition_en_attente(resultat)["conversation"]
+    assert [e["role"] for e in conversation] == ["humain", "agent", "humain", "agent"]
+    assert conversation[0]["message"] == "Première ?"
+    assert conversation[2]["message"] == "Deuxième ?"
+
+
+def test_la_proposition_reaffiche_le_dialogue_deja_tenu():
+    """C'est ce qui permet de reprendre le fil le lendemain, depuis un autre poste."""
+    with agent_persistant(":memory:") as app:
+        config = thread("t")
+        app.invoke(etat(SCHEMA_AVEC_ECART), config)
+        resultat = dialoguer(app, config, "Pourquoi ?")
+
+    proposal = proposition_en_attente(resultat)
+    assert proposal["conversation"]
+    assert proposal["questions_restantes"] == MAX_ECHANGES - 2
+    # la proposition elle-même n'a pas changé : discuter n'altère pas ce qui est
+    # proposé, sinon elle bougerait sous les yeux de l'humain pendant qu'il réfléchit
+    assert proposal["proposed_fix"]
+
+
+def test_discuter_nécrit_rien():
+    """Dix questions ne modifient ni les données, ni le contrat, ni la validation."""
+    with agent_persistant(":memory:") as app:
+        config = thread("t")
+        app.invoke(etat(SCHEMA_AVEC_ECART, contract_version="v1"), config)
+        resultat = dialoguer(app, config, "Q1 ?", "Q2 ?", "Q3 ?")
+
+    assert resultat["applied_fix"] is None
+    assert resultat["validation"] is None
+    assert resultat["contract_version"] == "v1"
+
+
+def test_p3_tient_apres_une_longue_discussion(monkeypatch):
+    """**Le test qui compte pour cette fonctionnalité.** Discuter n'est pas
+    approuver : quel que soit le nombre d'échanges, `apply` reste inatteignable
+    tant que le mot exact n'a pas été prononcé."""
+    atteintes = []
+    monkeypatch.setattr(
+        agent.graph,
+        "apply",
+        lambda state: (
+            atteintes.append(state) or {"logs": [log_entry("apply", "espion")]}
+        ),
+    )
+    with agent_persistant(":memory:") as app:
+        config = thread("t")
+        app.invoke(etat(SCHEMA_AVEC_ECART), config)
+        dialoguer(app, config, *[f"Question {i} ?" for i in range(5)])
+        assert atteintes == [], "apply atteint pendant une simple discussion"
+
+        # et il le devient dès que la décision tombe
+        dialoguer(app, config, {"decision": DECISION_APPROVED})
+    assert len(atteintes) == 1
+
+
+def test_p3_topologie_inchangee_malgre_la_nouvelle_branche():
+    """La 4ᵉ issue ne doit pas avoir ouvert de chemin vers `apply`."""
+    entrees = aretes_entrantes(build_agent().get_graph(), "apply")
+    assert entrees == [("propose", DECISION_APPROVED)]
+
+
+def test_la_question_remonte_bien_vers_diagnose_et_nulle_part_ailleurs():
+    graphe = build_agent().get_graph()
+    depuis_propose = {a.data: a.target for a in graphe.edges if a.source == "propose"}
+    assert depuis_propose[DEMANDE_QUESTION] == "diagnose"
+
+
+@pytest.mark.parametrize("question_vide", ["", "   ", None])
+def test_une_question_vide_nen_est_pas_une(question_vide):
+    """Sans question exploitable, on ne relance pas le modèle pour rien : le run
+    retombe sur « sans décision » et se termine sans rien écrire."""
+    with agent_persistant(":memory:") as app:
+        config = thread("t")
+        app.invoke(etat(SCHEMA_AVEC_ECART), config)
+        resultat = app.invoke(
+            Command(resume={"decision": DEMANDE_QUESTION, "question": question_vide}),
+            config,
+        )
+
+    assert proposition_en_attente(resultat) is None
+    assert parcours(resultat)[-1] == "log"
+    assert resultat["applied_fix"] is None
+
+
+def test_le_plafond_dechanges_ferme_le_run_sans_decision():
+    """Sans plafond, la boucle `propose → diagnose → propose` peut tourner sans
+    fin — notamment si le modèle est en panne et répond « je ne peux pas » à
+    chaque tour. Au-delà, le run se clôt **sans rien écrire** : direction sûre.
+    """
+    with agent_persistant(":memory:") as app:
+        config = thread("t")
+        app.invoke(etat(SCHEMA_AVEC_ECART), config)
+        # MAX_ECHANGES/2 questions produisent MAX_ECHANGES entrées (question + réponse)
+        resultat = dialoguer(
+            app, config, *[f"Q{i} ?" for i in range(MAX_ECHANGES // 2)]
+        )
+        assert proposition_en_attente(resultat) is not None, (
+            "on ne doit pas encore être coupé"
+        )
+
+        resultat = dialoguer(app, config, "La question de trop ?")
+
+    assert proposition_en_attente(resultat) is None, "le run devait se clore"
+    assert resultat["human_decision"] is None
+    assert resultat["applied_fix"] is None
+    assert parcours(resultat)[-1] == "log"
+    # la question restée sans réponse est quand même conservée : le journal doit
+    # montrer qu'on a coupé la parole à l'humain
+    assert resultat["conversation"][-1]["message"] == "La question de trop ?"
+
+
+def test_une_panne_du_modele_ne_casse_pas_le_dialogue(monkeypatch):
+    """Même mode dégradé que pour le diagnostic : l'agent dit qu'il ne peut pas
+    répondre, et les faits restent affichés."""
+
+    def en_panne(contexte, conversation, question):
+        raise ConnectionError("Groq injoignable")
+
+    monkeypatch.setattr(diagnose_mod, "repondre", en_panne)
+
+    with agent_persistant(":memory:") as app:
+        config = thread("t")
+        app.invoke(etat(SCHEMA_AVEC_ECART), config)
+        resultat = dialoguer(app, config, "Pourquoi ?")
+
+    proposal = proposition_en_attente(resultat)
+    assert proposal is not None, "le run doit rester ouvert malgré la panne"
+    assert "ne peux pas répondre" in proposal["conversation"][-1]["message"]
+    assert proposal["anomalies"], "les faits ne dépendent pas du modèle"
 
 
 # --- 5. La pause et la reprise (étape 3.2) -----------------------------------

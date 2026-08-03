@@ -220,6 +220,8 @@ START
                  │
                  ▼
               Propose ⏸ interrupt — attente de la décision humaine (Streamlit)
+                 │   ▲
+                 │   └── (question) ── retour à Diagnose, puis on revient ici
                  │
         ┌────────┼──────────────────┐
    (approved)  (amend_contract)  (rejected)
@@ -248,6 +250,16 @@ START
   Sans cette branche, un contrat figé finit par crier à chaque évolution normale du métier, l'équipe
   s'habitue à ignorer les alertes, et l'agent meurt. **`Amend` ne mène jamais à `Apply`** : amender une
   règle ne donne aucun droit d'écriture sur les données — c'est le test de preuve P3 qui le vérifie.
+- **`question` — demander avant de trancher** ⬅️ *ajouté le 2026-08-03*. Ce n'est **pas** une décision :
+  elle ne clôt rien, elle diffère. La question repart à `Diagnose` — donc **un seul nœud parle au LLM**,
+  la règle R1 tient —, la réponse revient, et la proposition attend de nouveau, dans la limite d'un
+  plafond d'échanges. Le dialogue est conservé dans l'état, donc dans `INCIDENTS`.
+
+  C'est la réponse à la faiblesse connue du HITL (§5.3 de `DESIGN.md`, « et si l'humain approuve sans
+  lire ? ») : un humain à qui on ne laisse que trois boutons approuve vite et mal. On peut désormais
+  montrer non pas « l'humain a approuvé », mais « l'humain a posé deux questions, obtenu ces réponses,
+  **puis** approuvé ». **Discuter ne rapproche pas de l'écriture** : `apply` garde son unique arête
+  entrante, et un test le vérifie après une longue discussion.
 - **Les deux « non » ne sont pas le même non** : *« c'est normal et ça le restera »* → `amend_contract`
   (permanent, change la règle) · *« exceptionnel, rien à changer »* → `rejected` (silence par signature,
   la règle est conservée). Les confondre ferait vieillir le contrat ou rendrait l'agent bavard.

@@ -111,14 +111,29 @@ autonome) :
 > agent qui n'existe plus. Les flèches en pointillés sont les branches conditionnelles ; leur libellé
 > est le vocabulaire exact qu'emploient `INCIDENTS` et `scripts/decide.py`.
 
-Les trois issues de `Propose` — c'est la distinction entre les deux « non » qui empêche le contrat de
-vieillir :
+Les trois **décisions** possibles — c'est la distinction entre les deux « non » qui empêche le contrat
+de vieillir :
 
 | Décision | Ce que ça veut dire | Effet |
 |---|---|---|
 | ✅ `approved` | la donnée est fausse | `Apply` corrige **les données** |
 | 📝 `amend_contract` | la donnée est juste, la règle a vieilli | `Amend` passe le contrat en v2 — **aucune écriture** sur les données |
 | ❌ `rejected` | cas isolé, rien à changer | `Log` seul ; la signature est mise en silence |
+
+**Et une quatrième réponse qui n'est pas une décision : `question`.** Avant de trancher, on peut
+demander à comprendre — la question repart à `Diagnose`, la réponse revient, et la proposition attend
+de nouveau :
+
+```bash
+uv run python -m scripts.decide <run> ask "pourquoi le job amont plutôt qu'un changement métier ?"
+uv run python -m scripts.decide <run> approve --by hoda
+```
+
+C'est la seule branche du graphe qui **remonte**, et elle répond à la faiblesse connue du HITL : un
+humain à qui on ne laisse que trois boutons approuve vite et mal. Le dialogue est conservé dans
+`INCIDENTS` — on peut donc montrer non pas « l'humain a approuvé », mais « l'humain a posé deux
+questions, obtenu ces réponses, **puis** approuvé ». **Discuter ne rapproche pas de l'écriture** : dix
+questions n'ouvrent pas `Apply`, et un test le vérifie.
 
 **Propriétés clés** — toutes **structurelles**, pas déclaratives :
 

@@ -23,6 +23,7 @@ graph TD;
 	profile --> detect;
 	propose -. &nbsp;amend_contract&nbsp; .-> amend;
 	propose -. &nbsp;approved&nbsp; .-> apply;
+	propose -. &nbsp;question&nbsp; .-> diagnose;
 	propose -. &nbsp;rejected&nbsp; .-> log;
 	validate --> log;
 	log --> __end__;

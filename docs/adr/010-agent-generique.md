@@ -230,6 +230,59 @@ renvoyer `cause` au lieu de `root_cause`, ou omettre un champ).
 
 ---
 
+## Décision 6 — Pouvoir discuter avant de décider (2026-08-03)
+
+### Contexte
+
+Trois issues, trois boutons. Le `DESIGN.md` anticipe déjà la question de jury qui va avec : *« et si
+l'humain approuve sans lire ? »*. Un validateur à qui on ne laisse que trois boutons approuve vite, et
+le HITL devient un tampon plutôt qu'un contrôle.
+
+### Options envisagées
+
+- **(a) Décision en texte libre.** L'humain écrit ce qu'il veut, l'agent interprète. Écarté : `route_after_propose`
+  devrait *deviner* ce qui a été voulu dire — exactement ce que le projet s'interdit partout ailleurs.
+  Et `INCIDENTS` ne pourrait plus servir à calculer la précision au benchmark.
+- **(b) `propose` répond lui-même aux questions.** Écarté : `propose` appellerait le LLM, et la règle R1
+  (« le LLM n'est appelé que dans `Diagnose` ») tomberait. Deux nœuds en contact avec le modèle, c'est
+  deux endroits à auditer, à simuler en test et à surveiller.
+- **(c) Une 4ᵉ issue `question` qui renvoie à `Diagnose`.**
+
+### Décision
+
+**Option (c).** `Propose` gagne une quatrième réponse qui **n'est pas une décision** : elle ne clôt
+rien, elle diffère. La question repart à `Diagnose`, la réponse revient, la proposition attend de
+nouveau. C'est la seule branche du graphe qui **remonte**.
+
+La décision finale reste l'un des trois mots : c'est elle qui route le graphe, qui est enregistrée, et
+qui sert au benchmark.
+
+### Ce que ça préserve
+
+**P3 est intact.** `Apply` garde son unique arête entrante, étiquetée `approved`. Discuter ne rapproche
+pas de l'écriture — un test le vérifie après cinq questions, et la topologie le garantit pour toute
+exécution.
+
+**R1 est intacte.** Un seul nœud parle au modèle. `agent/llm.py` gagne une seconde fonction
+(`repondre`), mais elle est appelée depuis `diagnose`, comme la première.
+
+### Garde-fous
+
+- **Plafond de 10 échanges.** Sans lui, la boucle `propose → diagnose → propose` peut tourner sans fin —
+  notamment si le modèle est en panne et répond « je ne peux pas » à chaque tour. Au-delà, le run se
+  clôt **sans décision** : rien n'écrit, tout est journalisé, l'humain relance un run.
+- **Une question vide n'en est pas une** — sinon `human_decision` resterait à `question` et le graphe
+  boucherait sans que personne n'ait parlé.
+- **Le diagnostic n'est pas retouché** pendant le dialogue. Si le modèle le réécrivait à chaque échange,
+  la proposition changerait sous les yeux de l'humain pendant qu'il réfléchit. Réviser un diagnostic sur
+  objection est une autre fonctionnalité, à traiter en phase 5 si elle s'avère utile.
+
+### Ce que ça apporte au projet
+
+Le dialogue est conservé dans l'état, donc dans le journal, donc dans `INCIDENTS`. On pourra montrer non
+pas « l'humain a approuvé », mais « l'humain a posé deux questions, obtenu ces réponses, **puis**
+approuvé ». C'est une meilleure réponse à *« et s'il approuve sans lire ? »* qu'un taux d'approbation.
+
 ## Question ouverte — l'amendement du registre (soulevée le 2026-08-03)
 
 Le registre `datasets/<dataset>.yaml` déclare les tables à surveiller. Il peut donc, lui aussi,
