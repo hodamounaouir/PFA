@@ -41,8 +41,8 @@ Changer de dataset = écrire un nouveau `datasets/<nom>.yaml` et refaire le benc
 | 0 | Fondations & accès | 3–5 j | ✅ terminé le 2026-07-21 |
 | 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ✅ terminé le 2026-07-21 |
 | 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | ✅ terminé le 2026-07-27 |
-| 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | 🚧 **en cours** (3.1 ✅ · 3.2 ✅ · 3.3 ✅ · 3.4 ✅ · reste l'ADR 010) |
-| 4 | Socle générique + agent réel + `INCIDENTS` | 3 sem | ⬜ |
+| 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | ✅ terminé le 2026-08-03 |
+| 4 | Socle générique + agent réel + `INCIDENTS` | 3 sem | ⬜ ⬅️ **prochaine** |
 | 5 | HITL complet : pause, reprise, Apply borné | 1–2 sem | ⬜ |
 | 6 | Observabilité & validation Streamlit | 1–2 sem | ⬜ |
 | 7 | 🌟 Cause racine (lineage) + extensions | 1–2 sem | ⬜ |
@@ -256,7 +256,7 @@ profile ──► detect ──(rien d'anormal)───────────
 au même titre que « aucun chemin n'atteint `apply` sans approbation » — et ça se prouve par test.
 
 ### 3.0 Tracer la décision avant de coder
-- [ ] `docs/adr/010-agent-generique.md` : les 5 décisions du 2026-07-28 (deux cycles · zéro nom en dur ·
+- [x] `docs/adr/010-agent-generique.md` : les 5 décisions du 2026-07-28 (deux cycles · zéro nom en dur ·
       contrat versionné comme 3ᵉ pilier · 8 nœuds / 3 issues · ne jamais inventer une valeur), avec les
       alternatives écartées — dont « découverte une seule fois puis contrat figé », rejetée pour cause
       d'obsolescence du contrat et de piège descriptif ↔ normatif
@@ -269,10 +269,10 @@ au même titre que « aucun chemin n'atteint `apply` sans approbation » — et 
       Le tableau d'avancement du README, resté bloqué à « phase 0 en cours », est resynchronisé.)*
 
 ### 3.1 Le graphe
-- [ ] `agent/state.py` : `AgentState` (TypedDict) — base §5.2 du cahier, dont `logs: Annotated[list, add]`.
+- [x] `agent/state.py` : `AgentState` (TypedDict) — base §5.2 du cahier, dont `logs: Annotated[list, add]`.
       **Champs ajoutés le 2026-07-28** : `dataset` (nom du registre), `contract` (le contrat chargé),
       `contract_version`, et `human_decision` qui accepte désormais `approved | rejected | amend_contract`
-- [ ] `agent/nodes/` : les **8 nœuds en stub** (valeurs en dur) : `profile`, `detect`, `diagnose`,
+- [x] `agent/nodes/` : les **8 nœuds en stub** (valeurs en dur) : `profile`, `detect`, `diagnose`,
       `propose`, `apply`, **`amend`**, `validate`, `log`
 - [x] `agent/graph.py` : assemblage + les **2 conditional edges** :
       `detect → (diagnose | log)` et `propose → (apply | amend | log)` ⬅️ *3 branches*
@@ -374,8 +374,12 @@ au même titre que « aucun chemin n'atteint `apply` sans approbation » — et 
       Un test qui ne peut pas échouer ne prouve rien.
 - [x] Test pause/reprise après redémarrage du process *(fait avec l'étape 3.2, dont il dépendait)*
 
-**☑ Phase terminée quand** : les 4 chemins passent en test ; la reprise post-redémarrage marche ; les
-tests de preuve P3 et « sortie unique » passent ; le PNG du graphe est généré.
+**☑ Phase terminée quand** : ~~les 4 chemins passent en test ; la reprise post-redémarrage marche ; les
+tests de preuve P3 et « sortie unique » passent ; le PNG du graphe est généré.~~
+✅ **Les 4 critères sont remplis (2026-08-03).** 184 tests verts. Ce qui est acquis et ne doit plus
+régresser : `apply` inatteignable sans approbation (P3, prouvé topologiquement *et* à l'exécution),
+`log` en sortie unique, la pause qui survit à la mort du process, et un LLM dont la panne ne tue pas
+le run. Les nœuds restent des **stubs** : c'est la tuyauterie qui est validée, pas l'intelligence.
 
 ---
 
@@ -713,3 +717,5 @@ dans le temps imparti, testée en conditions réelles.
 | 2026-07-24 | 2 | 🚧 **2.3 scaffolding Airflow** : `Dockerfile` (venv isolé du pipeline), `docker-compose.yaml` (LocalExecutor + Postgres), DAG `medallion_pipeline` (8 tâches, `@daily`, `catchup=True`), `archive_baseline.py`, runbook Windows | Airflow tourne **sur le PC de Hoda** (pas de Docker sur le serveur) → modèle « code ici, exécution là-bas » ; tests dbt tolérants par code de sortie (rc=1 = détection = vert) ; `.gitattributes` force LF (CRLF Windows) |
 | 2026-07-27 | 2 | ✅ **Phase 2 terminée** : DAG dépausé sur le PC → **92 runs verts** (backfill complet de la fenêtre) ; RAW/STAGING/MARTS peuplés ; `benchmarks/baseline_run.json` archivé (92 entrées, commit `8ffd7a1`) | **La baseline est figée** — plus aucune modification à partir d'ici, c'est le point de comparaison du benchmark (phase 8) |
 | 2026-07-28 | 3–5 | 📐 **Révision de design (aucun code)** : l'agent doit être **générique**, Olist n'étant qu'un cas de test. Séance de conception → PROGRESS mis à jour (phases 3, 4, 5, 6, 8, 9) | **5 décisions** : (1) deux cycles — Découverte (contrats) + Surveillance (graphe) ; (2) zéro nom en dur, classification par **rôle de colonne** ; (3) le **contrat versionné** devient le 3ᵉ pilier de détection, construit sur J1→J44 (période propre) ; (4) graphe à **8 nœuds**, `propose` a 3 issues (+ `amend_contract`) ; (5) garde-fou **« ne jamais inventer une valeur »**. Piège identifié : un contrat auto-généré naïvement graverait `sao paulo`/`são paulo` comme valides → la découverte doit *critiquer*, pas seulement enregistrer. ADR 010 à rédiger. |
+| 2026-08-02 | — | 🔧 **Incident d'infrastructure (hors projet)** : le dépôt vivait dans `/tmp`, que systemd nettoie tous les 10 jours. 23 objets git manquants, 4 commits sur 9 irrécupérables, ADR 001 et 008 effacés. Réparé par `git fetch --refetch` ; fichiers restaurés. | **Règle adoptée : rien ne dort dans `/tmp` plus d'une session**, on pousse à chaque étape terminée. Ce qui a détruit les fichiers, c'est six jours sans push — pas `/tmp` en soi. Copie de travail sur le PC + GitHub comme référence. |
+| 2026-08-03 | 3 | ✅ **Phase 3 terminée** : `AgentState` + les 8 nœuds stubs + `agent/graph.py` (3.1) ; pause/reprise réelle — `interrupt()`, `SqliteSaver`, `scripts/decide.py` (3.2) ; `diagnose` appelle vraiment Groq, sortie forcée en JSON + Pydantic (3.3) ; tests du graphe — 4 chemins, preuve P3, sortie unique, reprise après mort du process (3.4) ; documentation remise en cohérence + ADR 010 (3.0) ; PNG du graphe généré depuis le code. **184 tests verts.** | **Méthode adoptée : la vérification par mutation** — on sabote le code exprès pour vérifier que les tests deviennent rouges ; un test qui ne peut pas échouer ne prouve rien. 9 sabotages joués, tous détectés. **Écart au plan assumé** : mode JSON natif de Groq au lieu de `PydanticOutputParser` (empêche le format invalide au lieu de le rattraper). **Incident** : trois helpers de test appelaient la vraie API sans qu'on le voie (suite passée de 6 à 172 s) → `tests/conftest.py` rend la règle « aucun test n'appelle un LLM » structurelle. **Bug tiers** : `Command(resume=None)` lève dans LangGraph 1.2.9. **Leçon** : les schémas écrits à la main dérivent — celui du graphe est désormais généré par `scripts/export_graph.py`. |
