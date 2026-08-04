@@ -15,8 +15,9 @@ connecteur — il le résout lui-même depuis le registre. C'est aussi la forme 
 Airflow aura besoin en 4.5 : `(dataset, layer, table, batch_id)`, quatre chaînes.
 """
 
+from agent.tools.profile_table import profile_table
 from agent.tools.read_schema_history import read_schema_history
 from agent.tools.robust_stats import robust_stats
 from agent.tools.top_values import top_values
 
-__all__ = ["read_schema_history", "robust_stats", "top_values"]
+__all__ = ["profile_table", "read_schema_history", "robust_stats", "top_values"]

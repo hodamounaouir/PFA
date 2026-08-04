@@ -516,6 +516,88 @@ format**, détectable pour rien puisqu'il fallait compter de toute façon.
 Cette mesure n'était pas au plan. Elle est apparue en traitant une contrainte (« `AVG` échouerait sur
 Bronze ») au lieu de la contourner.
 
+## Décision 11 — L'assembleur porte le critère, et le critère ignore les types SQL (2026-08-04)
+
+### Contexte
+
+Les décisions 9a et 10a ont créé une famille de **méthodes de colonne** — une requête chacune, donc
+demandées à la demande. Elles ont aussi créé une dette, formulée explicitement à chaque fois :
+*« quelles colonnes méritent quelle mesure devient une décision d'appelant »*. `profile_table` (4.1.5)
+est ce premier appelant. La dette arrive à échéance.
+
+### Options envisagées
+
+1. **L'appelant liste les colonnes.** `profile_table(dataset, table, batch_id, colonnes_top,
+   colonnes_stats)`. Honnête — l'assembleur n'assemble que ce qu'on lui demande — mais il n'est plus
+   appelable seul : quelqu'un doit déjà savoir. On repousse le problème d'un cran, et 4.3 devrait
+   inventer sa propre règle dans un nœud, sans test dédié.
+2. **L'assembleur porte un critère provisoire.** Il est autonome, testable seul, et 4.2 remplacera la
+   règle. Au prix d'un critère qu'on sait faux par endroits, dans le code, pendant quelques semaines.
+
+### Décision
+
+Option 2, choisie explicitement par le porteur du projet. La règle vit dans **une seule fonction**,
+`_mesure_pour()`, que la caractérisation par rôle de 4.2 remplacera — tout le reste de l'assembleur
+est indifférent à la façon dont le choix est fait.
+
+### Le point qui n'était pas dans la question : le critère ne lit aucun nom de type
+
+Le critère « texte + faible cardinalité » présuppose de savoir ce qu'est « du texte ». La voie évidente
+— lire `DATA_TYPE` depuis `INFORMATION_SCHEMA` — a été **écartée**, pour deux raisons qui pointent dans
+le même sens.
+
+La première est structurelle : `VARCHAR`, `NUMBER`, `TEXT` sont du vocabulaire Snowflake. Un tool qui
+les interpréterait ferait entrer un dialecte de base dans une couche qui doit les ignorer (décision 2).
+Le SQL est sous la couture ; les *noms de types* doivent l'être aussi.
+
+La seconde est fatale, et c'est elle qui tranche : **en Bronze, tout est VARCHAR par construction**
+(phase 2.1). Un critère fondé sur le type déclaré n'y trouverait *aucune* colonne numérique — donc
+aucune statistique robuste sur la couche où les anomalies sont précisément injectées. L'étape 4.1.3
+aurait été livrée inutilisable là où elle sert le plus.
+
+Le critère ne lit donc que des **faits mesurés**, que n'importe quel backend produit :
+
+| Ce qu'on observe | Ce qu'on en déduit | Mesure |
+|---|---|---|
+| aucune valeur distincte | colonne vide sur ce lot | aucune |
+| `min` **et** `max` se lisent comme des nombres | la colonne porte des quantités | `robust_stats` |
+| cardinalité ≤ 50 % des lignes | la colonne se répète, donc elle catégorise | `top_values` |
+| le reste | identifiant ou texte libre | aucune |
+
+Les bornes disent la vérité là où le type ment : `min="0.00"`, `max="99.99"` est une colonne de
+montants, qu'elle soit déclarée `VARCHAR` ou `NUMBER`.
+
+### Ce que ça coûte, et qu'on assume
+
+- **Un code postal est « lisible comme un nombre ».** Il recevra une médiane, qui ne veut rien dire.
+  Le critère confond *écrit comme un nombre* et *est une quantité* — soit exactement la distinction
+  identifiant/numérique que le classement par rôle de 4.2 tranchera. Le coût est une requête inutile,
+  pas un faux positif : `detect` ne compare pas encore ces médianes.
+- **Une colonne de dates peu variée peut recevoir un top-K.** Sans intérêt, sans danger ; 4.2 lui
+  donnera le rôle *temporel*.
+- **Deux valeurs ne font pas une preuve.** `min` et `max` numériques ne garantissent pas que le reste
+  l'est — mais `robust_stats` rend `numeric_rate`, qui mesure exactement à quel point la supposition
+  était juste. On suppose à bas prix, on mesure honnêtement.
+- **Le seuil penche du côté généreux** (50 %). Rater une colonne catégorielle, c'est rater une
+  détection — dont le cas São Paulo. En mesurer une de trop coûte une requête, et `coverage` le dit
+  immédiatement.
+
+### Ce qu'il faudra surveiller
+
+**Le coût en allers-retours de métadonnées.** Chaque méthode de colonne résout son propre schéma
+(elle doit rester appelable seule, ADR 004). Profiler une table coûte donc une requête
+`INFORMATION_SCHEMA` par colonne mesurée, en plus du balayage d'agrégats — sur une seule connexion,
+mais pas gratuitement. Sur 17 tables, c'est mesurable.
+
+Le remède est connu et local : mémoriser le schéma sur l'instance de connecteur, dont la durée de vie
+est exactement un appel de tool. Il n'est **pas** implémenté — le mesurer sur le vrai Snowflake avant
+d'optimiser vaut mieux que de deviner, et 4.5 (branchement Airflow) est le moment où le coût réel
+apparaîtra.
+
+**Ce qui a été évité, en revanche** : `profile_table` appelle les **méthodes du connecteur**, jamais
+les autres tools. Passer par `top_values.invoke()` aurait rouvert une connexion Snowflake par colonne
+— une à deux secondes chacune. Un test l'impose.
+
 ## Question ouverte — l'amendement du registre (soulevée le 2026-08-03)
 
 Le registre `datasets/<dataset>.yaml` déclare les tables à surveiller. Il peut donc, lui aussi,
