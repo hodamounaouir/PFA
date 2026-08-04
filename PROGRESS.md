@@ -418,37 +418,82 @@ CYCLE A — DÉCOUVERTE  (hors DAG, une fois par table, puis à la demande)
 CYCLE B — SURVEILLANCE  (le graphe 8 nœuds de la phase 3, à chaque batch, dans Airflow)
 ```
 
-### 4.0 Socle générique — ce qui rend l'agent interchangeable ⬅️ *nouveau*
-- [ ] `agent/connectors/base.py` : interface commune — `list_tables()`, `get_schema(table)`,
-      `profile(table, batch_filter)`. **Aucun SQL Snowflake au-dessus de cette couche.**
-- [ ] **Une table déclarée mais absente ne doit pas faire lever le connecteur** : il retourne
-      l'information, il ne trébuche pas. C'est ce qui permet à la famille *inventaire* de 4.3 de la
-      traiter comme une **anomalie constatée** plutôt que comme un plantage. Un agent qui casse quand
-      la donnée manque ne détecte rien — il disparaît au moment où on a le plus besoin de lui.
-- [ ] `agent/connectors/snowflake.py` : la première implémentation (les autres viendront : Postgres,
-      REST/FastAPI de l'objectif O1, CSV)
-- [ ] `datasets/olist.yaml` : le **registre** — connecteur, tables à surveiller, `batch_column`, couche.
-      C'est le seul fichier à écrire pour brancher un nouveau dataset :
-      ```yaml
-      name: olist
-      connector: snowflake
-      tables:
-        - {name: RAW.ORDERS, layer: bronze, batch_column: _batch_id}
-      ```
-- [ ] Test de généricité : le socle tourne sur un **second dataset jouet** (quelques CSV sans rapport
-      avec Olist) sans modifier une ligne de code — juste un nouveau YAML de registre
-- [ ] Ce qui reste **déclaré** et non inférable, à documenter honnêtement : la colonne de batch, les
+### 4.0 Socle générique — ce qui rend l'agent interchangeable ✅ *terminé le 2026-08-03*
+
+> **Écart au plan assumé** (ADR 010, décision 7) : pas de `agent/connectors/base.py`. Le projet n'a
+> qu'un backend réel — Postgres a été écarté par l'ADR 009, et l'API REST/FastAPI de O1 est une source
+> d'**ingestion**, pas un connecteur d'agent (confusion de catégorie du plan initial, corrigée ici).
+> Une classe abstraite pour une implémentation unique aurait été de la généralisation spéculative. On
+> garde la **couture** — tout le SQL sous `agent/connectors/` — et c'est un **test** qui l'impose.
+
+- [x] `agent/connectors/__init__.py` : le contrat des trois méthodes (`list_tables`, `get_schema`,
+      `profile`) + une fabrique nom → connecteur. `profile` reçoit `(batch_column, batch_id)` et
+      **jamais un fragment de SQL** — sinon du SQL existerait au-dessus de la couture.
+- [x] `agent/connectors/snowflake.py` : le seul fichier de `agent/` où du SQL a le droit d'exister
+- [x] **Une table déclarée mais absente ne fait pas lever le connecteur** : `get_schema` et `profile`
+      retournent `None`. C'est ce qui permet à la famille *inventaire* de 4.3 de la traiter comme une
+      **anomalie constatée** plutôt que comme un plantage. Un agent qui casse quand la donnée manque
+      ne détecte rien — il disparaît au moment où on a le plus besoin de lui.
+- [x] **Symétrique** : un registre *mal écrit* (`batch_column` inexistante), lui, échoue bruyamment.
+      Ce n'est pas une anomalie de donnée mais une erreur de déclaration — la masquer profilerait la
+      table entière en croyant filtrer un lot, ce qui diluerait l'anomalie cherchée.
+- [x] `datasets/olist.yaml` : le **registre** — 17 tables sur les 3 couches. Gold n'a pas de
+      `batch_column` (un agrégat est reconstruit en entier) : le connecteur profile alors toute la
+      table, et c'est le comportement correct.
+- [x] `agent/registry.py` : chargement + **validation stricte** — couche fermée, champ inconnu refusé,
+      doublon refusé. Un registre fautif échoue au chargement, pas trois nœuds plus loin.
+- [x] Test de généricité : un dataset RH étranger à Olist, branché par un YAML + un connecteur en
+      mémoire, **sans qu'une ligne de `agent/` change**
+- [x] `test_aucun_sql_hors_des_connecteurs` : le garde-fou qui remplace la classe abstraite
+- [x] `OPS` exclu de `list_tables()` — la mémoire de l'agent n'est pas le système observé
+      (ADR 010, décision 8)
+- [x] Ce qui reste **déclaré** et non inférable, documenté honnêtement : la colonne de batch, les
       tables à surveiller, les règles métier (injectées par l'humain à la validation du contrat)
+- [ ] ⏭️ *Reporté, option ouverte* : un connecteur CSV/pandas (~1 j) ferait passer la promesse de
+      « portable d'un schéma à l'autre » (démontré) à « portable d'un backend à l'autre » (démontrable
+      en direct devant un jury). Seul endroit de la phase 4 où un jour achète une réponse de soutenance.
 
 ### 4.1 Les tools (un par un, testés isolément)
-- [ ] `profile_table` : volumes, taux de nulls par colonne, cardinalités, **min/max**, moyenne, écart-type,
-      top-K valeurs, fraîcheur — en SQL agrégé uniquement, via le connecteur
+
+> **Décision préalable, tranchée le 2026-08-03** ([ADR 004](docs/adr/004-langgraph-vs-function-calling.md)) :
+> les tools sont bien décorés `@tool` comme le demande le §5.6 du cahier — mais **`bind_tools`
+> n'apparaît nulle part**. Le décorateur est un *format* ; le tool-calling est une *délégation de flux*,
+> celle que `DESIGN.md` §2 rejette. Un test l'impose, comme le test anti-fuite SQL de 4.0.
+> Conséquence : les signatures ne prennent que des chaînes, et le tool résout le connecteur lui-même —
+> soit exactement la forme dont Airflow aura besoin en 4.5.
+
+- [x] **4.1.1** `read_schema_history` : lit `OPS._SCHEMA_HISTORY` via `agent/connectors/ops.py`
+      *(2ᵉ et dernier fichier de `agent/` autorisé à contenir du SQL — la mémoire de l'agent, pas le
+      système observé, cf. ADR 010 décision 8)*
+  - [x] ⚠️ **Deux pièges hérités de la phase 2.1, absorbés ici** : l'historique enregistre le nom du
+        **fichier CSV** (`orders`, pas `RAW.ORDERS`) et la **casse du CSV** (`order_id`), alors que
+        Snowflake rend `ORDER_ID`. Comparer naïvement ferait apparaître **toutes** les colonnes comme
+        renommées, à chaque run, sur chaque table. On normalise en majuscules avant de rendre.
+  - [x] **Portée à dire honnêtement** : `_SCHEMA_HISTORY` n'est écrite que par l'ingestion, donc elle
+        ne couvre que **Bronze**. La dérive de schéma en Silver/Gold devra se mesurer contre le
+        contrat (4.2), pas contre cet historique.
+- [ ] **4.1.2** ⭐ `top_values` : les K valeurs les plus fréquentes d'une colonne. **Sans elle, aucune
+      détection sémantique** — l'agent sait aujourd'hui qu'il y a 8 000 villes distinctes, pas
+      lesquelles. Une requête par colonne, donc un critère de choix est nécessaire (provisoirement
+      « texte + faible cardinalité », le vrai critère vient de la caractérisation en 4.2).
+- [ ] **4.1.3** Statistiques robustes : **médiane + MAD**, pas moyenne + écart-type *(sinon l'anomalie
+      du J60 entre dans l'historique et fait paraître la récidive du J85 moins grave)*. ⚠️ Sur Bronze
+      tout est VARCHAR : `AVG` échouerait — `TRY_CAST`, ou stats numériques réservées à Silver/Gold.
+- [ ] **4.1.4** Fraîcheur — dépend de savoir quelle colonne est temporelle, donc partiellement de 4.2
+- [ ] **4.1.5** `profile_table` : l'assembleur — agrégats du connecteur + top-K + stats robustes, en
+      une seule fiche. C'est le point où 4.1 devient consommable par 4.3.
       *(⚠️ min/max sont indispensables : une seule ligne aberrante — 8000 dans une colonne à [1–100] —
-      ne déplace presque pas la moyenne mais fait exploser le max)*
-- [ ] `read_schema_history` : lit `OPS._SCHEMA_HISTORY`
-- [ ] `run_sql` : **lecture seule** — rejet par liste de mots-clés d'écriture + journalisation de chaque requête
-- [ ] `generate_dq_rule` : produit un dbt test YAML rattaché à une dimension DAMA
-- [ ] `write_log` : écrit dans `OPS.INCIDENTS`
+      ne déplace presque pas la moyenne mais fait exploser le max. Déjà livrés en 4.0.)*
+- [ ] **4.1.6** `run_sql` : **lecture seule** — rejet par liste de mots-clés d'écriture + journalisation
+      de chaque requête. *(C'est le premier brouillon du garde-fou d'`Apply`, règle R4, phase 5.)*
+- [ ] **4.1.7** DDL `OPS.INCIDENTS` + `write_log` — **le DDL est monté depuis 4.4** : il fait dix
+      lignes, et sans lui `write_log` se code à l'aveugle
+- [ ] **4.1.8** `generate_dq_rule` : produit un dbt test YAML rattaché à une dimension DAMA
+      *(en dernier — rien avant 4.5 n'en dépend)*
+
+**Chemin critique vers la détection** : 4.1.1 ✅ · 4.1.2 · 4.1.3 · 4.1.5. Avec ces quatre-là, `detect`
+(4.3) peut attraper les 4 anomalies injectées **et** le cas São Paulo. `run_sql`, `write_log` et
+`generate_dq_rule` ne bloquent rien.
 
 ### 4.2 Cycle Découverte : caractérisation & contrats ⬅️ *nouveau*
 - [ ] `agent/characterize/` : **classer chaque colonne par rôle inféré** — c'est le moteur de généricité
@@ -757,3 +802,5 @@ dans le temps imparti, testée en conditions réelles.
 | 2026-07-28 | 3–5 | 📐 **Révision de design (aucun code)** : l'agent doit être **générique**, Olist n'étant qu'un cas de test. Séance de conception → PROGRESS mis à jour (phases 3, 4, 5, 6, 8, 9) | **5 décisions** : (1) deux cycles — Découverte (contrats) + Surveillance (graphe) ; (2) zéro nom en dur, classification par **rôle de colonne** ; (3) le **contrat versionné** devient le 3ᵉ pilier de détection, construit sur J1→J44 (période propre) ; (4) graphe à **8 nœuds**, `propose` a 3 issues (+ `amend_contract`) ; (5) garde-fou **« ne jamais inventer une valeur »**. Piège identifié : un contrat auto-généré naïvement graverait `sao paulo`/`são paulo` comme valides → la découverte doit *critiquer*, pas seulement enregistrer. ADR 010 à rédiger. |
 | 2026-08-02 | — | 🔧 **Incident d'infrastructure (hors projet)** : le dépôt vivait dans `/tmp`, que systemd nettoie tous les 10 jours. 23 objets git manquants, 4 commits sur 9 irrécupérables, ADR 001 et 008 effacés. Réparé par `git fetch --refetch` ; fichiers restaurés. | **Règle adoptée : rien ne dort dans `/tmp` plus d'une session**, on pousse à chaque étape terminée. Ce qui a détruit les fichiers, c'est six jours sans push — pas `/tmp` en soi. Copie de travail sur le PC + GitHub comme référence. |
 | 2026-08-03 | 3 | ✅ **Phase 3 terminée** : `AgentState` + les 8 nœuds stubs + `agent/graph.py` (3.1) ; pause/reprise réelle — `interrupt()`, `SqliteSaver`, `scripts/decide.py` (3.2) ; `diagnose` appelle vraiment Groq, sortie forcée en JSON + Pydantic (3.3) ; tests du graphe — 4 chemins, preuve P3, sortie unique, reprise après mort du process (3.4) ; documentation remise en cohérence + ADR 010 (3.0) ; PNG du graphe généré depuis le code. **184 tests verts.** | **Méthode adoptée : la vérification par mutation** — on sabote le code exprès pour vérifier que les tests deviennent rouges ; un test qui ne peut pas échouer ne prouve rien. 9 sabotages joués, tous détectés. **Écart au plan assumé** : mode JSON natif de Groq au lieu de `PydanticOutputParser` (empêche le format invalide au lieu de le rattraper). **Incident** : trois helpers de test appelaient la vraie API sans qu'on le voie (suite passée de 6 à 172 s) → `tests/conftest.py` rend la règle « aucun test n'appelle un LLM » structurelle. **Bug tiers** : `Command(resume=None)` lève dans LangGraph 1.2.9. **Leçon** : les schémas écrits à la main dérivent — celui du graphe est désormais généré par `scripts/export_graph.py`. |
+| 2026-08-03 | 4 | ✅ **4.0 Socle générique terminé** : `datasets/olist.yaml` (17 tables, 3 couches) ; `agent/registry.py` (chargement + validation stricte) ; `agent/connectors/` (fabrique + connecteur Snowflake) ; `tests/test_socle.py` — **28 tests, 224 verts au total**. 7 sabotages joués, tous détectés. | **Écart au plan assumé** : pas de classe abstraite (ADR 010, décision 7) — le projet n'a qu'un backend réel, et ce qui protège la propriété « l'agent ne connaît pas sa base » n'est pas l'héritage mais le test `test_aucun_sql_hors_des_connecteurs`, qui relit tout `agent/`. **Deux erreurs du plan corrigées** : Postgres avait été écarté par l'ADR 009, et l'API REST/FastAPI de O1 est une source d'*ingestion*, pas un connecteur d'agent. **Décision 8** : `OPS` (la mémoire de l'agent) n'est pas derrière le connecteur — sinon l'agent se découvrirait lui-même à chaque run, et la mémoire se fragmenterait en autant de bases que de datasets. **Reporté** : connecteur CSV (~1 j) pour démontrer la portabilité de backend au lieu de l'argumenter. |
+| 2026-08-03 | 4 | 🚧 **4.1.0 + 4.1.1** : [ADR 004](docs/adr/004-langgraph-vs-function-calling.md) rédigé ; `agent/connectors/ops.py` (la mémoire de l'agent) ; `agent/tools/read_schema_history.py` (1ᵉʳ `@tool`) ; `tests/test_tools.py` — **237 tests verts**. 6 sabotages joués, tous détectés. | **Contradiction apparente levée** : le cahier §5.6 demande des tools `@tool`, `DESIGN.md` §2 rejette l'agent ReAct. Les deux parlent de choses différentes — le **décorateur** (un format) et le **tool-calling** (une délégation de flux). Décision : `@tool` oui, `bind_tools` jamais, et un test l'impose. **Bug évité de justesse** : `_SCHEMA_HISTORY` stocke le nom du CSV (`orders`) et la casse du CSV (`order_id`) là où `INFORMATION_SCHEMA` rend `RAW.ORDERS`/`ORDER_ID` — comparés tels quels, 4.3 aurait vu **toutes** les colonnes renommées à chaque run. **Leçon de méthode** : mon 1ᵉʳ sabotage de `bind_tools` plantait à l'import, donc pytest signalait une *erreur* et non un *échec* — le script de mutation ne cherchait que « failed » et concluait « non détecté ». Un sabotage doit être **réaliste**, sinon c'est lui qu'on teste. |
