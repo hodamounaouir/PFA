@@ -11,6 +11,83 @@
 # J1 = 2018-03-01 (fenêtre figée dans data/config.py, 92 jours)
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# PRÉPARATION (2026-08-04) — ce qu'on RETIRE du dataset, et non ce qu'on ajoute.
+# -----------------------------------------------------------------------------
+# Décision : la fenêtre de référence J1→J43 doit être ENTIÈREMENT propre. C'est
+# sur elle que l'agent construira son contrat en phase 4.2 ; s'il apprend sur des
+# données déjà sales, il grave le désordre comme la norme et le cas d'école du
+# projet est perdu avant d'avoir commencé.
+#
+# Audit du 2026-08-04 sur les 5 colonnes texte du registre : une seule est sale.
+#   customer_city          2 206 -> 2 206  (0 collision, ASCII pur)
+#   customer_state            27 ->    27
+#   order_status               6 ->     6
+#   product_category_name     73 ->    73
+#   geolocation_city       8 011 -> 5 945  ⚠️ 2 042 collisions naturelles
+#
+# Appliqué par data/prepare.py au moment du rejeu, pas par une commande séparée.
+preparation:
+  - id: normalize_geolocation_city
+    day: 1
+    date: 2018-03-01
+    table: geolocation
+    column: geolocation_city
+    rule: strip_accents_lower_collapse_spaces
+    dama_dimension: coherence
+    effect: "8011 -> 5967 valeurs distinctes (2044 collisions repliées)"
+    description: >
+      Casse, accents et espaces multiples repliés sur la forme canonique ASCII
+      minuscule — celle qu'utilise déjà customer_city. Les collisions naturelles
+      de São Paulo disparaissent donc de la référence, et reviennent au J50 en
+      tant qu'anomalie datée (semantic_drift_j50), mesurable comme les autres.
+      La règle NE supprime PAS tous les espaces : ce serait fusionner des villes
+      réellement différentes. Les 22 paires qui ne diffèrent que par un espace
+      sont traitées par la règle suivante, séparément et explicitement.
+
+  - id: fold_space_variants_geolocation_city
+    day: 1
+    date: 2018-03-01
+    table: geolocation
+    column: geolocation_city
+    rule: fold_space_variants_on_majority
+    dama_dimension: coherence
+    effect: "5967 -> 5945 valeurs distinctes (22 variantes d'espace repliées)"
+    description: >
+      Résidu de la règle précédente : 22 paires que le dataset écrit déjà
+      pareil à un espace près — ['arcoverde', 'arco verde'],
+      ['mogi das cruzes', 'mogidascruzes'], ['herval d oeste', 'herval doeste'].
+      Chacune est repliée sur sa forme MAJORITAIRE observée, départage
+      alphabétique à égalité. La règle ne décide jamais que deux villes sont la
+      même : elle constate que le dataset les écrit déjà ainsi et tranche par le
+      nombre. Après elle, cardinalité normalisée == cardinalité brute.
+
+  - id: repair_mojibake_geolocation_city
+    day: 1
+    date: 2018-03-01
+    table: geolocation
+    column: geolocation_city
+    rule: repair_declared_mojibake
+    dama_dimension: coherence
+    effect: "3 valeurs réparées, 3 lignes sur 1 000 163 (0,0003 %)"
+    mapping:
+      "sa£o paulo": sao paulo
+      "maceia³": maceio
+      "´teresopolis": teresopolis
+    description: >
+      Corruption d'ENCODAGE, pas d'accent : `sa£o paulo` est un `são paulo`
+      passé par un mauvais round-trip d'octets. Aucune règle générale ne peut
+      le rattraper — rien dans la chaîne ne dit que `£` valait `ã` — donc on
+      énumère nommément. Chacune de ces 3 valeurs est le doublon caché d'une
+      forme déjà massivement présente (sao paulo 160 720, maceio 2 368,
+      teresopolis 1 201). NON réparé volontairement : `4º centenario`
+      (2 lignes), qui n'est pas une corruption mais un vrai nom de commune du
+      Paraná — le `º` y est légitime.
+      Découvert le 2026-08-04 : les deux règles précédentes déclaraient la
+      fenêtre propre alors qu'un São Paulo cassé s'y cachait. L'invariant de
+      cardinalité ne voit que ce qu'il sait replier ; le test qui compte est
+      « aucune valeur restante n'est le doublon caché d'une autre ».
+
 anomalies:
   - id: schema_drift_j45
     day: 45
@@ -68,15 +145,65 @@ anomalies:
       Récidive EXACTE de nulls_j60 : mesure le gain mémoire de l'agent
       (T1 vs T2, objectif O7). Ne pas modifier indépendamment de nulls_j60.
 
-# Anomalie RÉELLE du dataset (non injectée — présente en permanence) :
-# l'agent doit aussi la détecter, elle compte dans le rappel du benchmark.
-real_anomalies:
-  - id: semantic_sao_paulo
-    table: geolocation
-    column: geolocation_city
+  # ---------------------------------------------------------------------------
+  # ⭐ Le fil rouge du projet (2026-08-04) — la seule anomalie ÉTALÉE.
+  # ---------------------------------------------------------------------------
+  # Remplace l'ancienne section `real_anomalies.semantic_sao_paulo`, supprimée le
+  # 2026-08-04 : les collisions naturelles de geolocation_city sont désormais
+  # nettoyées au J1 (cf. `preparation`), et le cas revient ici DATÉ et QUANTIFIÉ.
+  # On y gagne une mesure au lieu d'un constat : en phase 8, l'agent « détecte au
+  # jour J » au lieu de « signale un état permanent ».
+  #
+  # Pourquoi une rampe et pas un jour unique : un nouvel outil de saisie se
+  # déploie progressivement. Le signal est faible au début (~23 lignes/jour) et
+  # fort à la fin (~183) — ce qui donne à la phase 8 une vraie question à
+  # mesurer : À PARTIR DE QUELLE AMPLEUR L'AGENT VOIT-IL ? Un seul jour ne
+  # répondrait que par oui/non.
+  #
+  # Porte sur `customers` (delta quotidien, 99→372 lignes/jour) et non sur
+  # `geolocation` (référentiel figé au J1) : l'anomalie doit arriver DANS les
+  # lots entrants, pas dans le socle. customer_city est ASCII pur (0 collision
+  # naturelle, audit du 2026-08-04), donc toute valeur accentuée est la nôtre.
+  - id: semantic_drift_j50
+    from_day: 50
+    from_date: 2018-04-19
+    to_day: 92
+    to_date: 2018-05-31
+    table: customers
     type: semantic_variants
     dama_dimension: coherence
-    evidence: "135 800 'sao paulo' / 24 918 'são paulo' / 2 'sãopaulo' (tests/test_semantic_case.py)"
+    params:
+      column: customer_city
+      # Un palier vaut jusqu'au suivant. Jours choisis libres : ils ne
+      # télescopent aucune autre injection (J45, J60, J75, J80, J85).
+      rate_schedule: {50: 0.10, 65: 0.40, 78: 0.80}
+      # 18 villes réellement présentes ET réellement accentuées en portugais
+      # (top 40 de customer_city, mesuré le 2026-08-04 → 5 920 lignes candidates
+      # sur 21 023, soit 28 %). Table DÉCLARÉE, pas devinée : on n'ajoute pas
+      # « des accents », on applique une correspondance écrite.
+      variants:
+        sao paulo: são paulo
+        brasilia: brasília
+        sao bernardo do campo: são bernardo do campo
+        niteroi: niterói
+        santo andre: santo andré
+        goiania: goiânia
+        sao jose dos campos: são josé dos campos
+        florianopolis: florianópolis
+        jundiai: jundiaí
+        ribeirao preto: ribeirão preto
+        maua: mauá
+        belem: belém
+        sao goncalo: são gonçalo
+        sao jose do rio preto: são josé do rio preto
+        vitoria: vitória
+        sao luis: são luís
+        taboao da serra: taboão da serra
+        sao caetano do sul: são caetano do sul
     description: >
-      Variantes de casse/accent de São Paulo : tout agrégat par ville éclate la
-      métropole en plusieurs lignes (85/15). Cas réel, preuve permanente dans tests/.
+      Dérive sémantique progressive : à partir du J50, une part croissante des
+      villes du batch quotidien est saisie sous sa forme accentuée. Même ville,
+      deux clés d'agrégation — tout agrégat par ville éclate en deux lignes sans
+      qu'aucun test de complétude, d'unicité ou de format ne bronche. C'est
+      précisément le trou que la baseline dbt ne peut pas voir (phase 2.2) et que
+      l'agent doit combler.

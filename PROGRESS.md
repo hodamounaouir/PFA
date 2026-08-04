@@ -39,7 +39,7 @@ Changer de dataset = écrire un nouveau `datasets/<nom>.yaml` et refaire le benc
 | Phase | Titre | Durée estimée | Statut |
 |:-:|-------|:-:|:-:|
 | 0 | Fondations & accès | 3–5 j | ✅ terminé le 2026-07-21 |
-| 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ✅ terminé le 2026-07-21 |
+| 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ✅ terminé le 2026-07-21 · §1.5 ajoutée le 2026-08-04 |
 | 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | ✅ terminé le 2026-07-27 |
 | 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | ✅ terminé le 2026-08-03 |
 | 4 | Socle générique + agent réel + `INCIDENTS` | 3 sem | ⬜ ⬅️ **prochaine** |
@@ -153,6 +153,49 @@ documentées** (`ground_truth.yaml`). C'est le contrat de vérité du projet.
 
 **☑ Phase terminée quand** : `replay --from J1 --to J90` + injection produisent des batchs reproductibles ;
 `ground_truth.yaml` est exhaustif ; le double comptage est prouvé par une requête.
+✅ **Rempli le 2026-07-21**, puis **rouvert le 2026-08-04** (§1.5) pour rendre la fenêtre de référence propre.
+
+### 1.5 Fenêtre de référence propre & chargement incrémental ✅ *2026-08-04 — rouverture assumée*
+
+> **Pourquoi rouvrir une phase terminée.** Le contrat de la phase 4.2 se construit sur la fenêtre de
+> référence. La mesure du 2026-08-04 a montré qu'elle portait **2 042 collisions naturelles** sur
+> `geolocation_city` : le contrat aurait gravé `sao paulo` + `são paulo` comme deux villes légitimes,
+> et le cas d'école du projet aurait été perdu **avant** d'avoir commencé. C'était le dernier moment
+> où la correction restait honnête — `detect` (4.3) n'est pas écrit, donc aucune mesure n'est faussée
+> rétroactivement. La règle du corrigé l'autorise explicitement : *modifiable pendant la construction,
+> gelé dès que l'agent est évalué*.
+
+- [x] **Décision de méthode** : la fenêtre **J1→J43 est entièrement propre** (`config.REFERENCE_END_DAY`),
+      les anomalies n'existent que dans les lots qui arrivent **après**. Chaque jour chargé devient un
+      événement que l'agent doit traiter — c'est aussi ce qui se montre en soutenance.
+- [x] **Audit préalable des 5 colonnes texte du registre** : une seule est sale.
+      `customer_city` 2 206/2 206 · `customer_state` 27/27 · `order_status` 6/6 ·
+      `product_category_name` 73/73 · **`geolocation_city` 8 011/5 945** ⚠️
+- [x] `data/prepare.py` — **3ᵉ opération du pipeline**, la seule qui *retire* du désordre. Trois règles
+      déclarées dans `ground_truth.yaml` (jamais codées en dur : on doit pouvoir reconstruire *tout* ce
+      qui a été fait au dataset) :
+  - [x] `strip_accents_lower_collapse_spaces` : 8 011 → 5 967 (2 044 collisions)
+  - [x] `fold_space_variants_on_majority` : 5 967 → 5 945 — replie `['arcoverde', 'arco verde']` sur la
+        forme **majoritaire observée**, départage alphabétique. Ne décide jamais que deux villes sont la
+        même : constate que le dataset les écrit déjà ainsi et tranche par le nombre.
+  - [x] `repair_declared_mojibake` : 5 945 → 5 942 — `sa£o paulo`, `maceia³`, `´teresopolis`. **Corruption
+        d'octets, pas d'accent** : rien dans la chaîne ne dit que `£` valait `ã`, donc on énumère.
+        `4º centenario` **non réparé** volontairement — vraie commune du Paraná.
+- [x] `semantic_variants` + **rampes étalées** dans `data/inject.py` : une anomalie peut se déclarer en
+      plage avec des paliers, résolue au chargement en une entrée par jour. `inject_day` inchangé.
+- [x] `ground_truth.yaml` : section `preparation`, anomalie `semantic_drift_j50` (J50→J92, paliers
+      10/40/80 % sur `customer_city`, 18 villes déclarées), **`real_anomalies` supprimée** — tout ce que
+      l'agent doit trouver est désormais daté et quantifié, donc mesurable en phase 8.
+- [x] **Rechargement** : DROP des 6 tables RAW (un `TRUNCATE` aurait laissé la colonne `AMOUNT` créée par
+      la dérive du J45 — la fenêtre doit être propre jusque dans son *schéma*), `_SCHEMA_HISTORY` vidée,
+      rejeu + ingestion J1→J43, `dbt run`.
+- [x] **Vérifié** : écart de cardinalité normalisée **= 0 sur les 6 colonnes** · `AMOUNT` absente du
+      schéma et de l'historique · 0 marqueur `.injected` · `sao paulo` consolidé à 160 719 points en
+      **une** ligne, sans fusionner les homonymes (São Paulo do Potengi/RN, de Olivença/AM, das
+      Missões/RS, et celui de l'Acre restent distincts) · **dbt test : 18 PASS / 0 échec** (avant : 13
+      PASS / 5 détections) — la baseline elle-même ne trouve plus rien à redire.
+- [ ] ⚠️ **Dette ouverte** : `benchmarks/baseline_run.json` décrit encore l'ancien run de 92 jours. Il se
+      régénérera **au fil du chargement progressif**, une ligne par jour, avant la phase 8.
 
 ---
 
@@ -803,4 +846,5 @@ dans le temps imparti, testée en conditions réelles.
 | 2026-08-02 | — | 🔧 **Incident d'infrastructure (hors projet)** : le dépôt vivait dans `/tmp`, que systemd nettoie tous les 10 jours. 23 objets git manquants, 4 commits sur 9 irrécupérables, ADR 001 et 008 effacés. Réparé par `git fetch --refetch` ; fichiers restaurés. | **Règle adoptée : rien ne dort dans `/tmp` plus d'une session**, on pousse à chaque étape terminée. Ce qui a détruit les fichiers, c'est six jours sans push — pas `/tmp` en soi. Copie de travail sur le PC + GitHub comme référence. |
 | 2026-08-03 | 3 | ✅ **Phase 3 terminée** : `AgentState` + les 8 nœuds stubs + `agent/graph.py` (3.1) ; pause/reprise réelle — `interrupt()`, `SqliteSaver`, `scripts/decide.py` (3.2) ; `diagnose` appelle vraiment Groq, sortie forcée en JSON + Pydantic (3.3) ; tests du graphe — 4 chemins, preuve P3, sortie unique, reprise après mort du process (3.4) ; documentation remise en cohérence + ADR 010 (3.0) ; PNG du graphe généré depuis le code. **184 tests verts.** | **Méthode adoptée : la vérification par mutation** — on sabote le code exprès pour vérifier que les tests deviennent rouges ; un test qui ne peut pas échouer ne prouve rien. 9 sabotages joués, tous détectés. **Écart au plan assumé** : mode JSON natif de Groq au lieu de `PydanticOutputParser` (empêche le format invalide au lieu de le rattraper). **Incident** : trois helpers de test appelaient la vraie API sans qu'on le voie (suite passée de 6 à 172 s) → `tests/conftest.py` rend la règle « aucun test n'appelle un LLM » structurelle. **Bug tiers** : `Command(resume=None)` lève dans LangGraph 1.2.9. **Leçon** : les schémas écrits à la main dérivent — celui du graphe est désormais généré par `scripts/export_graph.py`. |
 | 2026-08-03 | 4 | ✅ **4.0 Socle générique terminé** : `datasets/olist.yaml` (17 tables, 3 couches) ; `agent/registry.py` (chargement + validation stricte) ; `agent/connectors/` (fabrique + connecteur Snowflake) ; `tests/test_socle.py` — **28 tests, 224 verts au total**. 7 sabotages joués, tous détectés. | **Écart au plan assumé** : pas de classe abstraite (ADR 010, décision 7) — le projet n'a qu'un backend réel, et ce qui protège la propriété « l'agent ne connaît pas sa base » n'est pas l'héritage mais le test `test_aucun_sql_hors_des_connecteurs`, qui relit tout `agent/`. **Deux erreurs du plan corrigées** : Postgres avait été écarté par l'ADR 009, et l'API REST/FastAPI de O1 est une source d'*ingestion*, pas un connecteur d'agent. **Décision 8** : `OPS` (la mémoire de l'agent) n'est pas derrière le connecteur — sinon l'agent se découvrirait lui-même à chaque run, et la mémoire se fragmenterait en autant de bases que de datasets. **Reporté** : connecteur CSV (~1 j) pour démontrer la portabilité de backend au lieu de l'argumenter. |
+| 2026-08-04 | 1 · 4 | ✅ **1.5 — fenêtre de référence propre + chargement incrémental** : `data/prepare.py` (3 règles déclarées) ; `semantic_variants` + rampes étalées dans `inject.py` ; `ground_truth.yaml` refondu (section `preparation`, `semantic_drift_j50`, `real_anomalies` supprimée) ; Bronze remis à zéro et rechargé **J1→J43** ; `dbt test` **18 PASS / 0 échec**. **250 tests verts**, 7 sabotages joués, tous détectés. | **Décision** : la référence est propre, les anomalies n'existent que dans les lots qui arrivent après — chaque jour chargé devient un événement. **Rouverture assumée de la phase 1** : dernier moment honnête, `detect` n'étant pas écrit. **Le fil rouge change de nature** : São Paulo passe d'anomalie *réelle et permanente* à anomalie *injectée et datée* (rampe 10/40/80 % sur `customer_city`) — on y gagne une mesure de sensibilité (« à partir de quelle ampleur l'agent voit-il ? ») au lieu d'un oui/non. **Trois erreurs rattrapées par la mesure** : `juiz de fora` figurait dans ma table de variantes sans avoir d'accent (remplacement à vide) ; du **mojibake** (`sa£o paulo`) se cachait sous les accents et mon invariant « cardinalité normalisée == brute » le déclarait propre à tort — remplacé par « aucune valeur restante n'est le doublon caché d'une autre » ; `TRUNCATE` aurait laissé la colonne `AMOUNT` du J45 dans le schéma. **Leçon de méthode (suite du 2026-08-03)** : mon 1ᵉʳ run de mutation était **contaminé** par un test déjà rouge — tous les sabotages passaient pour détectés. Le script vérifie désormais que la suite est verte *avant* de saboter ; en le corrigeant, deux vrais trous sont apparus (rien ne vérifiait que `replay` **appelle** la préparation ; une rampe pouvait déclarer un jour de début ≠ son premier palier). **Dette** : `baseline_run.json` à régénérer au fil du chargement. |
 | 2026-08-03 | 4 | 🚧 **4.1.0 + 4.1.1** : [ADR 004](docs/adr/004-langgraph-vs-function-calling.md) rédigé ; `agent/connectors/ops.py` (la mémoire de l'agent) ; `agent/tools/read_schema_history.py` (1ᵉʳ `@tool`) ; `tests/test_tools.py` — **237 tests verts**. 6 sabotages joués, tous détectés. | **Contradiction apparente levée** : le cahier §5.6 demande des tools `@tool`, `DESIGN.md` §2 rejette l'agent ReAct. Les deux parlent de choses différentes — le **décorateur** (un format) et le **tool-calling** (une délégation de flux). Décision : `@tool` oui, `bind_tools` jamais, et un test l'impose. **Bug évité de justesse** : `_SCHEMA_HISTORY` stocke le nom du CSV (`orders`) et la casse du CSV (`order_id`) là où `INFORMATION_SCHEMA` rend `RAW.ORDERS`/`ORDER_ID` — comparés tels quels, 4.3 aurait vu **toutes** les colonnes renommées à chaque run. **Leçon de méthode** : mon 1ᵉʳ sabotage de `bind_tools` plantait à l'import, donc pytest signalait une *erreur* et non un *échec* — le script de mutation ne cherchait que « failed » et concluait « non détecté ». Un sabotage doit être **réaliste**, sinon c'est lui qu'on teste. |

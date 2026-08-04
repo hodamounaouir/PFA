@@ -15,6 +15,13 @@ INCOMING_DIR = DATA_DIR / "incoming"
 WINDOW_START = "2018-03-01"
 WINDOW_END = "2018-05-31"  # inclus → 92 jours, J1 = 2018-03-01
 
+# Fin de la fenêtre de RÉFÉRENCE (décision du 2026-08-04) : J1→J43 doit rester
+# entièrement propre — aucune anomalie injectée, aucune collision naturelle
+# (cf. section `preparation` de ground_truth.yaml). C'est sur cette fenêtre que
+# l'agent construira son contrat en phase 4.2 ; s'il apprend sur des données
+# sales, il grave le désordre comme la norme. Un test l'asserte.
+REFERENCE_END_DAY = 43
+
 # Déterminisme des choix aléatoires (injection d'anomalies).
 SEED = 42
 

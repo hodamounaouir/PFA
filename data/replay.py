@@ -4,6 +4,12 @@ Un jour rejoué = un dossier `data/incoming/YYYY-MM-DD/` contenant les commandes
 du jour (orders, order_items, order_payments, customers). Au jour 1 de la
 fenêtre, les référentiels (products, geolocation) sont livrés en entier.
 
+Le rejeu applique aussi les **préparations** déclarées dans `ground_truth.yaml`
+(cf. `data/prepare.py`) : au J1, `geolocation_city` est normalisée, pour que la
+fenêtre de référence sur laquelle l'agent construira son contrat soit propre.
+C'est fait ici et non dans une commande séparée — une étape qu'on peut oublier
+produirait silencieusement un socle sale.
+
 Déterministe : mêmes arguments → mêmes fichiers, à l'octet près.
 
 Usage :
@@ -17,7 +23,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from data import config
+from data import config, prepare
 
 
 def load_tables() -> dict[str, pd.DataFrame]:
@@ -58,13 +64,31 @@ def write_batch(batch: dict[str, pd.DataFrame], day: date) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     # Un batch réécrit redevient vierge : l'injecteur pourra repasser
     (folder / ".injected").unlink(missing_ok=True)
+    # Nettoyage déclaré (data/prepare.py) : appliqué ici plutôt que dans une
+    # commande séparée, pour qu'un rejeu ne puisse pas produire un batch sale
+    # parce qu'on aurait oublié l'étape d'après.
+    for ligne in prepare.appliquer(batch, day):
+        print(ligne)
     for name, df in batch.items():
         # Tri par clés puis reset d'index : sortie identique à chaque exécution
         df.sort_values(by=list(df.columns[:2]), kind="mergesort").to_csv(
             folder / f"{name}.csv", index=False
         )
     counts = ", ".join(f"{name}={len(df)}" for name, df in batch.items())
-    print(f"📦 {day} → {folder.relative_to(config.DATA_DIR.parent)}  ({counts})")
+    print(f"📦 {day} → {_affichable(folder)}  ({counts})")
+
+
+def _affichable(chemin) -> str:
+    """Chemin relatif au dépôt quand c'est possible, absolu sinon.
+
+    `relative_to` lève dès que la sortie n'est pas sous la racine — ce qui
+    arrive à tout test qui écrit dans un `tmp_path`. Une ligne d'affichage ne
+    doit jamais faire tomber un pipeline de données.
+    """
+    try:
+        return str(chemin.relative_to(config.DATA_DIR.parent))
+    except ValueError:
+        return str(chemin)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
