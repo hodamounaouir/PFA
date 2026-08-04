@@ -16,5 +16,6 @@ Airflow aura besoin en 4.5 : `(dataset, layer, table, batch_id)`, quatre chaîne
 """
 
 from agent.tools.read_schema_history import read_schema_history
+from agent.tools.top_values import top_values
 
-__all__ = ["read_schema_history"]
+__all__ = ["read_schema_history", "top_values"]

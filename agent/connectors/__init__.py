@@ -2,17 +2,33 @@
 
 ## Le contrat
 
-Un connecteur expose **trois méthodes**, et l'agent ne lui demande jamais rien
+Un connecteur expose **quatre méthodes**, et l'agent ne lui demande jamais rien
 d'autre :
 
-    list_tables()                          -> list[str]        les tables réellement présentes
-    get_schema(table)                      -> list[dict]|None  les colonnes, ou None si absente
-    profile(table, batch_column, batch_id) -> dict|None        des agrégats, ou None si absente
+    list_tables()                              -> list[str]        les tables réellement présentes
+    get_schema(table)                          -> list[dict]|None  les colonnes, ou None si absente
+    profile(table, batch_column, batch_id)     -> dict|None        des agrégats, ou None si absente
+    top_values(table, column, k,               -> dict|None        les k valeurs les plus fréquentes,
+               batch_column, batch_id)                             ou None si table/colonne absente
 
 `profile` reçoit **la colonne de lot et sa valeur**, jamais un fragment de SQL.
 La nuance n'est pas cosmétique : si l'appelant passait `"_batch_id = '2018-04-29'"`,
 du SQL existerait au-dessus de cette couche — c'est-à-dire exactement ce que le
 socle sert à empêcher. Le connecteur reçoit des données, il fabrique le SQL.
+
+**Pourquoi `top_values` est une méthode et non un cas de `profile`** (phase 4.1.2) :
+`profile` fait *un* passage sur la table et rend la même chose pour toutes les
+colonnes. Un top-K coûte un `GROUP BY` **par colonne** — l'imposer à toutes
+multiplierait le coût du profilage par le nombre de colonnes, pour un résultat
+sans intérêt sur un identifiant ou du texte libre. Les deux ne se paient pas au
+même prix, donc elles ne se demandent pas ensemble.
+
+## Fermer, quand il y a quelque chose à fermer
+
+`close()` ne fait **pas** partie du contrat : un connecteur en mémoire n'a rien
+à fermer, et l'exiger de tous obligerait chacun à écrire une méthode vide. Les
+appelants passent donc par `fermer(connecteur)`, qui ferme si le connecteur sait
+le faire — la règle vit à un seul endroit plutôt que dans chaque tool.
 
 ## Aucune classe abstraite — et pourquoi (ADR 010, décision 7)
 
@@ -70,6 +86,19 @@ def ouvrir(nom: str):
             f"Connecteur {nom!r} inconnu — enregistrés : {', '.join(enregistres()) or '(aucun)'}"
         )
     return fabrique()
+
+
+def fermer(connecteur) -> None:
+    """Ferme le connecteur s'il a quelque chose à fermer, sinon ne fait rien.
+
+    Un run interrompu ne doit pas laisser une session ouverte derrière lui : le
+    warehouse Snowflake se suspend au bout de 60 s, mais la session, elle,
+    traîne. Un connecteur en mémoire, lui, n'a rien à libérer — d'où le `getattr`
+    plutôt qu'une méthode obligatoire dans le contrat.
+    """
+    close = getattr(connecteur, "close", None)
+    if callable(close):
+        close()
 
 
 def _fabrique_snowflake():

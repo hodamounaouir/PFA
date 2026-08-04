@@ -105,7 +105,7 @@ def _json_sur(valeur):
 
 
 class ConnecteurSnowflake:
-    """Accès en lecture à la base surveillée. Trois méthodes, pas une de plus."""
+    """Accès en lecture à la base surveillée. Quatre méthodes, pas une de plus."""
 
     def __init__(self, base: Optional[str] = None):
         load_dotenv(RACINE / ".env")
@@ -130,7 +130,7 @@ class ConnecteurSnowflake:
             self._conn.close()
             self._conn = None
 
-    # --- les trois méthodes du contrat -------------------------------------
+    # --- les quatre méthodes du contrat ------------------------------------
 
     def list_tables(self) -> list[str]:
         """Les tables et vues réellement présentes, en `SCHEMA.TABLE`.
@@ -233,6 +233,111 @@ class ConnecteurSnowflake:
             "batch_id": batch_id,
             "row_count": total,
             "columns": fiche,
+        }
+
+    def top_values(
+        self,
+        table: str,
+        column: str,
+        k: int,
+        batch_column: Optional[str] = None,
+        batch_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Les `k` valeurs les plus fréquentes d'une colonne, et leur poids.
+
+        C'est **la** méthode qui rend la détection sémantique possible : le
+        profil sait qu'il y a 8 000 villes distinctes, il ne sait pas
+        *lesquelles*. Sans les valeurs, `sao paulo` et `são paulo` restent deux
+        unités indiscernables dans un compteur.
+
+        Rend `None` quand la question n'a pas d'objet — table absente **ou**
+        colonne absente. La règle du fichier vaut ici aussi : constater, ne pas
+        trébucher. Une colonne disparue est précisément l'anomalie que la phase
+        4.3 doit attraper (le renommage `payment_value` → `amount` du J45) ; si
+        la demander faisait lever, le run mourrait sur l'incident qu'il cherche.
+
+        C'est la **symétrique** de `batch_column`, qui lève : celle-là est
+        *déclarée* par un humain dans le registre, donc son absence est une
+        erreur de déclaration. La colonne profilée, elle, vient de
+        l'introspection : son absence est un fait observé.
+
+        Forme rendue :
+
+            {"table", "column", "batch_id", "k",
+             "non_null_count": int,          lignes renseignées du lot
+             "coverage": float,              part de ces lignes couverte par le top-K
+             "top": [{"value", "count"}, …]} du plus fréquent au moins fréquent
+
+        `coverage` est ce qui dit si la colonne mérite qu'on la lise : proche de
+        1, quelques valeurs suffisent à décrire la colonne (elle est
+        catégorielle) ; proche de 0, c'est une longue traîne — du texte libre ou
+        un identifiant, dont le top-K n'apprend rien et ne doit pas partir vers
+        le modèle. Et `len(top) < k` signifie qu'on a vu **toute** la colonne, pas
+        seulement sa tête.
+
+        Les NULL sont exclus du décompte : ils sont déjà mesurés par `profile`,
+        et les garder mangerait un rang du top-K sans rien apprendre.
+
+        `k` n'a volontairement **pas** de valeur par défaut ici : combien de
+        valeurs on regarde est un réglage de *détection*, pas une propriété du
+        moteur. Il appartient à l'appelant (`agent/tools/top_values.py`), et
+        rejoindra `agent/config.py` avec les autres seuils en 4.3.
+        """
+        if k < 1:
+            raise ValueError(f"`k` doit valoir au moins 1 — reçu {k!r}")
+
+        colonnes = self.get_schema(table)
+        if colonnes is None:
+            return None
+
+        noms = [c["name"] for c in colonnes]
+        reelle = next((c for c in noms if c.upper() == column.upper()), None)
+        if reelle is None:
+            return None
+
+        schema, nom = _decouper(table)
+        where, parametres = self._filtre_de_lot(table, noms, batch_column, batch_id)
+        renseignee = f'"{reelle}" IS NOT NULL'
+        where = f"{where} AND {renseignee}" if where else f" WHERE {renseignee}"
+
+        # `SUM(COUNT(*)) OVER ()` rend le total des lignes renseignées du lot :
+        # la fenêtre s'applique après le GROUP BY et **avant** le LIMIT, donc
+        # elle compte tous les groupes, pas seulement les k retenus. C'est ce
+        # qui permet de calculer `coverage` sans une seconde requête.
+        #
+        # Le départage à égalité (`, "col" ASC`) n'est pas cosmétique : sans lui
+        # le k-ième rang basculerait d'un run à l'autre entre deux valeurs de
+        # même fréquence, et une détection qui dépend du top-K deviendrait
+        # intermittente. Même raison qu'au repli des variantes en phase 1.5.
+        curseur = self._curseur()
+        curseur.execute(
+            f'SELECT "{reelle}", COUNT(*), SUM(COUNT(*)) OVER () '
+            f"FROM {schema}.{nom}{where} "
+            f'GROUP BY "{reelle}" '
+            f'ORDER BY COUNT(*) DESC, "{reelle}" ASC '
+            f"LIMIT {int(k)}",
+            parametres,
+        )
+        lignes = curseur.fetchall()
+
+        # Zéro groupe = lot vide ou colonne entièrement nulle. Ce n'est pas une
+        # absence de réponse, c'est une réponse : la colonne ne porte rien.
+        total = int(lignes[0][2]) if lignes else 0
+        top = [
+            {"value": _json_sur(valeur), "count": int(compte)}
+            for valeur, compte, _ in lignes
+        ]
+
+        return {
+            "table": table,
+            "column": reelle,
+            "batch_id": batch_id,
+            "k": k,
+            "non_null_count": total,
+            "coverage": (
+                round(sum(v["count"] for v in top) / total, 6) if total else 0.0
+            ),
+            "top": top,
         }
 
     # --- interne -----------------------------------------------------------

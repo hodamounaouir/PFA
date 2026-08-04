@@ -218,6 +218,10 @@ valeurs** des colonnes catégorielles — donc de vraies valeurs de la base, et 
 abstraits. C'est là que la question se reposera sérieusement. Elle se reposera aussi si une contrainte
 de confidentialité réelle apparaît (entreprise, données sensibles).
 
+> **Le point de bascule a été atteint le 2026-08-04**, avec le tool `top_values` (étape 4.1.2) — voir
+> la **décision 9b** plus bas. Groq est maintenu, mais l'argument « il n'y a rien à fuiter » ne tient
+> plus : il est remplacé par un raisonnement sur la nature des colonnes interrogées.
+
 ### Mode JSON natif plutôt que `PydanticOutputParser`
 
 Le plan prévoyait `PydanticOutputParser` (LangChain). Retenu à la place : le mode JSON natif de Groq
@@ -367,6 +371,79 @@ Deux conséquences, l'une immédiate, l'autre structurelle :
   O7 (« l'agent se souvient ») n'aurait plus de lieu où s'exercer.
 
 Le connecteur lit ce qu'on surveille ; la mémoire reste là où l'agent vit.
+
+## Décision 9 — Le top-K entre au contrat, et R2 y change de nature (2026-08-04)
+
+### Contexte
+
+L'étape 4.1.2 ajoute `top_values` : les *K* valeurs les plus fréquentes d'une colonne. Ce n'est pas un
+tool de plus — c'est celui **sans lequel aucune détection sémantique n'existe**. Le profil sait déjà
+qu'une colonne porte 8 000 villes distinctes ; il ne sait pas *lesquelles*. Or `sao paulo` et
+`são paulo` sont, pour un compteur, deux unités parfaitement indiscernables.
+
+Deux questions se posaient en même temps, et elles n'ont pas la même nature.
+
+### Décision 9a — une 4ᵉ méthode plutôt qu'un enrichissement de `profile`
+
+Le contrat des connecteurs passe de trois méthodes à quatre :
+`top_values(table, column, k, batch_column, batch_id)`.
+
+L'alternative était de faire remonter le top-K depuis `profile`, en une passe. Elle a été écartée sur
+un argument de **coût**, pas de style : `profile` fait *un* passage sur la table et rend la même chose
+pour toutes les colonnes ; un top-K coûte un `GROUP BY` **par colonne**. L'imposer à toutes
+multiplierait le coût du profilage par le nombre de colonnes — pour un résultat sans le moindre
+intérêt sur un identifiant (K valeurs de fréquence 1) ou sur du texte libre. Deux opérations qui ne se
+paient pas au même prix ne se demandent pas ensemble.
+
+Conséquence assumée : quelles colonnes méritent un top-K devient une **décision d'appelant**. Le
+critère provisoire (« texte, faible cardinalité ») est celui de 4.1 ; le vrai viendra de la
+caractérisation par rôle en 4.2.
+
+### Décision 9b — R2 tient, mais plus pour la même raison
+
+C'était le point de bascule annoncé plus haut dans cet ADR, à propos de Groq et de Cortex. Jusqu'ici,
+tout ce qui remontait de la base était un **chiffre** : comptes, cardinalités, bornes. R2 (« le LLM ne
+reçoit jamais de lignes brutes ») était vraie *structurellement* — il n'y avait rien à fuiter.
+`top_values` rend de **vraies valeurs**.
+
+R2 n'est pas enfreinte : une valeur accompagnée de sa fréquence est une **distribution**, pas une
+ligne. On ne recompose pas un client à partir de `{"sao paulo": 8 412}`. Mais la garantie a changé de
+nature — elle était structurelle, elle devient **conditionnelle** : elle ne tient que tant qu'on
+interroge des colonnes *catégorielles*. Le top-K d'un nom, d'une adresse ou d'un e-mail serait une
+fuite, et rien dans le type de la colonne ne l'annonce.
+
+Trois mesures, du plus fort au plus faible :
+
+1. **une seule colonne nue dans la projection**, et elle est groupée. Une seconde colonne au `SELECT`
+   rendrait les lignes recomposables : ce ne serait plus une distribution, ce serait un extrait de
+   table. Un test le vérifie sur le SQL émis (`test_top_values_ne_projette_que_la_colonne_demandee`),
+   comme le test anti-fuite SQL de 4.0 ;
+2. **`coverage` est rendu avec la réponse** — la part des lignes que le top-K couvre. Proche de 1,
+   quelques valeurs décrivent la colonne : elle est catégorielle. Proche de 0, c'est une longue traîne,
+   donc du texte libre ou un identifiant, et ses valeurs n'ont rien à faire dans un prompt ;
+3. **le tool ne se censure pas lui-même**. Il constate `coverage` et rend ce qu'il a lu ; c'est la
+   caractérisation (4.2) qui choisit les colonnes à interroger, et `detect` qui décide de ce qui monte
+   vers `diagnose`. Un tool qui déciderait tout seul de se taire cacherait un fait à `detect`.
+
+### Ce qu'il faudra surveiller
+
+- **Le moment Cortex.** La question « les données ne quittent jamais Snowflake » ne se posait pas tant
+  que le modèle ne voyait que des chiffres. Elle se pose maintenant pour de bon. Elle reste tranchée
+  en faveur de Groq — les colonnes visées sont des villes, des statuts, des catégories de produits —
+  mais l'argument « il n'y a rien à fuiter » n'est plus disponible, et il ne faut pas continuer à
+  l'invoquer.
+- **La mesure 2 est un signal, pas une barrière.** Rien n'empêche aujourd'hui un appelant de demander
+  le top-K d'une colonne à `coverage` de 0,02 et de l'envoyer au modèle. C'est 4.2 qui doit rendre ce
+  chemin impossible en ne classant jamais une telle colonne comme catégorielle. Tant que 4.2 n'est pas
+  écrite, la garantie repose sur l'appelant — et c'est à dire, pas à masquer.
+
+### Décision 9c — `close()` reste hors du contrat
+
+`top_values` est le premier tool à ouvrir un connecteur, donc le premier à devoir le refermer. Exiger
+`close()` de tout connecteur obligerait chaque implémentation en mémoire à écrire une méthode vide,
+pour un besoin qui ne concerne que celles qui tiennent une session. Les appelants passent donc par
+`connectors.fermer(connecteur)`, qui ferme si le connecteur sait le faire. La règle vit à un seul
+endroit au lieu d'être re-décidée dans chaque tool.
 
 ## Question ouverte — l'amendement du registre (soulevée le 2026-08-03)
 

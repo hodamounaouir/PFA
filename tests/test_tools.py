@@ -16,7 +16,9 @@ from pathlib import Path
 import pytest
 
 from agent.connectors.ops import MemoireOps, _cle_de_table
-from agent.tools import read_schema_history
+from agent.registry import Registre, TableDeclaree
+from agent.tools import read_schema_history, top_values
+from agent.tools.top_values import TOP_K_DEFAUT, TableNonDeclaree
 
 RACINE = Path(__file__).resolve().parent.parent
 
@@ -25,6 +27,7 @@ RACINE = Path(__file__).resolve().parent.parent
 # désigne donc le **tool**, pas le module — un `monkeypatch` dessus ne
 # remplacerait rien, silencieusement. On va chercher le module explicitement.
 tool_mod = importlib.import_module("agent.tools.read_schema_history")
+top_mod = importlib.import_module("agent.tools.top_values")
 
 
 # Ce que l'ingestion a réellement écrit en phase 2.1 : nom de fichier CSV,
@@ -187,6 +190,120 @@ def test_le_tool_est_bien_un_tool():
     assert hasattr(read_schema_history, "invoke")
     assert read_schema_history.name == "read_schema_history"
     assert read_schema_history.args_schema is not None
+
+
+# ---------------------------------------------------------------------------
+# `top_values` : le tool résout son connecteur lui-même
+# ---------------------------------------------------------------------------
+
+REGISTRE_FACTICE = Registre(
+    name="jouet",
+    connector="jouet_top",
+    tables=(
+        TableDeclaree(name="RH.EMPLOYES", layer="bronze", batch_column="_lot"),
+        TableDeclaree(name="MARTS.FCT_TOTAL", layer="gold"),
+    ),
+)
+
+
+class ConnecteurEspion:
+    """Enregistre ce qu'on lui demande, rend une fiche fixe."""
+
+    def __init__(self, plante=False):
+        self.plante = plante
+        self.ferme = False
+        self.appels = []
+
+    def top_values(self, table, column, k, batch_column=None, batch_id=None):
+        self.appels.append((table, column, k, batch_column, batch_id))
+        if self.plante:
+            raise RuntimeError("Snowflake indisponible")
+        return {"table": table, "column": column, "top": [], "coverage": 0.0}
+
+    def close(self):
+        self.ferme = True
+
+
+@pytest.fixture
+def espion(monkeypatch):
+    """Un registre factice et un connecteur espion, sans base ni fichier YAML."""
+    from agent import connectors
+
+    connecteur = ConnecteurEspion()
+    monkeypatch.setattr(top_mod, "charger", lambda nom: REGISTRE_FACTICE)
+    connectors.enregistrer("jouet_top", lambda: connecteur)
+    yield connecteur
+    connectors._FABRIQUES.pop("jouet_top", None)
+
+
+def test_le_tool_lit_le_registre_pour_trouver_la_colonne_de_lot(espion):
+    """Le cœur de l'ADR 004 : un `@tool` ne reçoit que des chaînes.
+
+    On ne peut pas lui passer un connecteur — il va donc chercher dans le
+    registre quel connecteur ouvrir *et* quelle colonne porte le lot. C'est
+    aussi la forme dont Airflow aura besoin en 4.5.
+    """
+    top_values.invoke(
+        {
+            "dataset": "jouet",
+            "table": "RH.EMPLOYES",
+            "column": "ville",
+            "batch_id": "l-1",
+        }
+    )
+    assert espion.appels == [("RH.EMPLOYES", "ville", TOP_K_DEFAUT, "_lot", "l-1")]
+
+
+def test_une_table_gold_n_a_pas_de_colonne_de_lot(espion):
+    """Pas un cas dégradé : un agrégat est reconstruit en entier, on le lit en entier."""
+    top_values.invoke(
+        {"dataset": "jouet", "table": "MARTS.FCT_TOTAL", "column": "ville"}
+    )
+    assert espion.appels[-1][3] is None
+
+
+def test_un_batch_vide_veut_dire_toute_la_table(espion):
+    """La signature d'un `@tool` n'accepte que des valeurs simples : `""` tient
+    lieu de « non précisé », et ne doit pas descendre tel quel dans un `WHERE`."""
+    top_values.invoke({"dataset": "jouet", "table": "RH.EMPLOYES", "column": "ville"})
+    assert espion.appels[-1][4] is None
+
+
+def test_une_table_non_declaree_echoue_bruyamment(espion):
+    """Erreur d'appel, pas anomalie de donnée — donc bruyante.
+
+    Sans `batch_column`, on lirait toute la table en croyant lire un jour : les
+    fréquences du lot se dilueraient dans 92 jours cumulés et la collision
+    cherchée deviendrait invisible. Le message nomme les tables déclarées, pour
+    que la faute de frappe saute aux yeux.
+    """
+    with pytest.raises(TableNonDeclaree, match="RH.EMPLOYES"):
+        top_values.invoke(
+            {"dataset": "jouet", "table": "RH.INCONNUE", "column": "ville"}
+        )
+    assert espion.appels == [], "aucune requête n'est partie"
+
+
+def test_le_connecteur_est_ferme_meme_si_la_lecture_echoue(monkeypatch):
+    from agent import connectors
+
+    connecteur = ConnecteurEspion(plante=True)
+    monkeypatch.setattr(top_mod, "charger", lambda nom: REGISTRE_FACTICE)
+    connectors.enregistrer("jouet_top", lambda: connecteur)
+    try:
+        with pytest.raises(RuntimeError):
+            top_values.invoke(
+                {"dataset": "jouet", "table": "RH.EMPLOYES", "column": "ville"}
+            )
+        assert connecteur.ferme
+    finally:
+        connectors._FABRIQUES.pop("jouet_top", None)
+
+
+def test_top_values_est_bien_un_tool():
+    assert top_values.name == "top_values"
+    champs = set(top_values.args_schema.model_fields)
+    assert {"dataset", "table", "column", "batch_id", "k"} == champs
 
 
 # ---------------------------------------------------------------------------

@@ -135,11 +135,14 @@ def test_connecteur_inconnu_nomme_les_disponibles():
 
 
 class ConnecteurJouet:
-    """Un connecteur en mémoire — les trois méthodes du contrat, aucune base.
+    """Un connecteur en mémoire — les quatre méthodes du contrat, aucune base.
 
     Il prouve deux choses à la fois : que le contrat des connecteurs tient sans
     classe abstraite, et que rien au-dessus de `agent/connectors/` ne suppose
     Snowflake.
+
+    Pas de `close()` : un connecteur en mémoire n'a rien à fermer. C'est
+    exactement le cas que `connectors.fermer()` doit absorber sans broncher.
     """
 
     TABLES = {
@@ -155,6 +158,7 @@ class ConnecteurJouet:
                     "salaire_brut": {"null_rate": 0.33, "distinct": 2},
                 },
             },
+            {"matricule": [("A-1", 1), ("A-2", 1), ("A-3", 1)]},
         )
     }
 
@@ -168,6 +172,23 @@ class ConnecteurJouet:
     def profile(self, table, batch_column=None, batch_id=None):
         entree = self.TABLES.get(table)
         return {**entree[1], "table": table, "batch_id": batch_id} if entree else None
+
+    def top_values(self, table, column, k, batch_column=None, batch_id=None):
+        entree = self.TABLES.get(table)
+        comptes = entree[2].get(column) if entree else None
+        if comptes is None:
+            return None
+        total = sum(c for _, c in comptes)
+        retenues = comptes[:k]
+        return {
+            "table": table,
+            "column": column,
+            "batch_id": batch_id,
+            "k": k,
+            "non_null_count": total,
+            "coverage": sum(c for _, c in retenues) / total,
+            "top": [{"value": v, "count": c} for v, c in retenues],
+        }
 
 
 JOUET = """
@@ -213,8 +234,21 @@ def test_une_table_declaree_absente_ne_fait_pas_lever(registre_jouet):
 
     assert connecteur.get_schema(absente.name) is None
     assert connecteur.profile(absente.name, absente.batch_column, "lot-1") is None
+    assert connecteur.top_values(absente.name, "matricule", 5) is None
     # et elle est bien déclarée : c'est l'écart déclaré/présent qui fait l'incident
     assert absente.name not in connecteur.list_tables()
+
+
+def test_fermer_un_connecteur_qui_n_a_rien_a_fermer(registre_jouet):
+    """`close()` ne fait pas partie du contrat, et ne doit pas y entrer.
+
+    L'exiger obligerait chaque connecteur en mémoire à écrire une méthode vide,
+    pour un besoin qui ne concerne que ceux qui tiennent une session ouverte.
+    Les tools passent donc par `fermer()`, et c'est lui qui absorbe le cas.
+    """
+    connecteur = connectors.ouvrir(registre_jouet.connector)
+    assert not hasattr(connecteur, "close")
+    connectors.fermer(connecteur)  # ne doit pas lever
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +402,137 @@ def test_les_noms_de_tables_douteux_sont_refuses(nom):
     """
     with pytest.raises(TableMalNommee):
         _decouper(nom)
+
+
+# ---------------------------------------------------------------------------
+# `top_values` — la 4ᵉ méthode, celle qui rend la détection sémantique possible
+# ---------------------------------------------------------------------------
+
+# Troisième colonne = le total des lignes renseignées, rendu par la fenêtre
+# `SUM(COUNT(*)) OVER ()` : la même valeur sur chaque ligne, par construction.
+VILLES = [("sao paulo", 6, 10), ("santos", 3, 10), ("são paulo", 1, 10)]
+
+
+def test_top_values_rend_les_valeurs_et_leur_poids(monkeypatch):
+    """LE tool sans lequel rien de sémantique n'est détectable.
+
+    Le profil sait qu'il y a 3 villes distinctes ; seul le top-K sait que deux
+    d'entre elles sont la même. C'est la matière première de la famille
+    *collisions sémantiques* (4.3).
+    """
+    connecteur, _ = brancher(monkeypatch, [COLONNES, VILLES])
+
+    fiche = connecteur.top_values("RH.EMPLOYES", "matricule", 20, "_batch_id", "lot-1")
+
+    assert fiche["top"][0] == {"value": "sao paulo", "count": 6}
+    assert fiche["non_null_count"] == 10
+    assert fiche["coverage"] == 1.0
+    assert fiche["column"] == "MATRICULE", (
+        "la casse réelle est rendue, pas celle demandée"
+    )
+
+
+def test_top_values_dit_ce_qu_il_ne_couvre_pas(monkeypatch):
+    """`coverage` est ce qui distingue une colonne catégorielle d'une longue traîne.
+
+    Sans lui, `detect` ne pourrait pas savoir si les 20 valeurs qu'il lit
+    décrivent la colonne ou en effleurent 2 %. C'est aussi le garde-fou de R2 :
+    une longue traîne, c'est du texte libre, et ses valeurs n'ont rien à faire
+    dans un prompt.
+    """
+    traine = [("a", 3, 300), ("b", 2, 300), ("c", 1, 300)]
+    connecteur, _ = brancher(monkeypatch, [COLONNES, traine])
+
+    fiche = connecteur.top_values("RH.EMPLOYES", "matricule", 3, "_batch_id", "lot-1")
+    assert fiche["coverage"] == 0.02
+    assert len(fiche["top"]) == fiche["k"], "top plein = on n'a vu que la tête"
+
+
+def test_top_values_ne_projette_que_la_colonne_demandee(monkeypatch):
+    """La nuance de R2, rendue vérifiable (ADR 010, « point de bascule »).
+
+    `profile` ne projette aucune colonne nue — il n'y a rien à fuiter. Ici,
+    projeter la colonne **est** le sujet : une valeur accompagnée de sa
+    fréquence est une *distribution*, pas une ligne. La frontière tient tant
+    qu'il n'y a **qu'une** colonne nue, et qu'elle est groupée : ajouter une
+    seconde colonne au SELECT rendrait les lignes recomposables — ce ne serait
+    plus une distribution, ce serait un extrait de table.
+    """
+    connecteur, curseur = brancher(monkeypatch, [COLONNES, VILLES])
+    connecteur.top_values("RH.EMPLOYES", "matricule", 20, "_batch_id", "lot-1")
+
+    projections = curseur.sql.split(" FROM ")[0].removeprefix("SELECT ").split(", ")
+    nues = [p for p in projections if not re.match(r"(COUNT|SUM|MIN|MAX)\(", p)]
+    assert nues == ['"MATRICULE"'], f"projection nue inattendue : {nues}"
+    assert 'GROUP BY "MATRICULE"' in curseur.sql
+
+
+def test_top_values_exclut_les_nulls(monkeypatch):
+    """Les NULL sont déjà comptés par `profile` : les garder mangerait un rang."""
+    connecteur, curseur = brancher(monkeypatch, [COLONNES, VILLES])
+    connecteur.top_values("RH.EMPLOYES", "matricule", 20, "_batch_id", "lot-1")
+
+    assert '"MATRICULE" IS NOT NULL' in curseur.sql
+    assert '"_BATCH_ID" = %s' in curseur.sql, "le filtre de lot tient toujours"
+    assert curseur.appels[-1][1] == ("lot-1",)
+
+
+def test_top_values_departage_les_ex_aequo(monkeypatch):
+    """Sans départage, le k-ième rang basculerait d'un run à l'autre.
+
+    Deux valeurs de même fréquence sortiraient dans un ordre arbitraire, et une
+    détection qui dépend du top-K deviendrait intermittente — l'un des pires
+    défauts possibles pour un projet dont la reproductibilité est le socle
+    (même leçon qu'au repli des variantes en phase 1.5).
+    """
+    connecteur, curseur = brancher(monkeypatch, [COLONNES, VILLES])
+    connecteur.top_values("RH.EMPLOYES", "matricule", 20, "_batch_id", "lot-1")
+
+    assert 'ORDER BY COUNT(*) DESC, "MATRICULE" ASC' in curseur.sql
+
+
+def test_top_values_sur_une_colonne_absente_rend_none(monkeypatch):
+    """Une colonne disparue est **l'anomalie cherchée**, pas un plantage.
+
+    C'est le renommage `payment_value` → `amount` du J45. Si la demander faisait
+    lever, le run mourrait sur l'incident qu'il est censé constater.
+    """
+    connecteur, curseur = brancher(monkeypatch, [COLONNES])
+
+    assert connecteur.top_values("RH.EMPLOYES", "colonne_envolee", 20) is None
+    # une seule requête : on n'a pas tenté d'agréger une colonne inexistante
+    assert len(curseur.appels) == 1
+
+
+def test_top_values_sur_une_table_absente_rend_none(monkeypatch):
+    connecteur, _ = brancher(monkeypatch, [[]])
+    assert connecteur.top_values("RH.DISPARUE", "matricule", 20) is None
+
+
+def test_une_colonne_de_lot_fausse_leve_meme_en_top_values(monkeypatch):
+    """La symétrie du fichier : ce qui est *déclaré* échoue fort, ce qui est
+    *observé* rend None. `batch_column` vient du registre, donc elle lève."""
+    connecteur, _ = brancher(monkeypatch, [COLONNES])
+    with pytest.raises(DeclarationFausse, match="_lot_inexistant"):
+        connecteur.top_values("RH.EMPLOYES", "matricule", 20, "_lot_inexistant", "l-1")
+
+
+def test_top_values_sur_un_lot_vide(monkeypatch):
+    """Zéro groupe : la colonne ne porte rien. C'est une réponse, pas une absence."""
+    connecteur, _ = brancher(monkeypatch, [COLONNES, []])
+
+    fiche = connecteur.top_values("RH.EMPLOYES", "matricule", 20, "_batch_id", "lot-1")
+    assert fiche["top"] == []
+    assert fiche["non_null_count"] == 0
+    assert fiche["coverage"] == 0.0, "0/0 vaut 0, pas une division par zéro"
+
+
+def test_un_k_absurde_est_refuse(monkeypatch):
+    """`k` finit interpolé dans un `LIMIT` : il est converti en entier, mais un
+    zéro ou un négatif est une erreur d'appel qui doit se voir tout de suite."""
+    connecteur, _ = brancher(monkeypatch, [COLONNES, VILLES])
+    with pytest.raises(ValueError, match="k"):
+        connecteur.top_values("RH.EMPLOYES", "matricule", 0, "_batch_id", "lot-1")
 
 
 def test_list_tables_ignore_la_memoire_de_l_agent(monkeypatch):
