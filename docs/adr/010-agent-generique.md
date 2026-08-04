@@ -445,6 +445,77 @@ pour un besoin qui ne concerne que celles qui tiennent une session. Les appelant
 `connectors.fermer(connecteur)`, qui ferme si le connecteur sait le faire. La règle vit à un seul
 endroit au lieu d'être re-décidée dans chaque tool.
 
+## Décision 10 — Le contrat se lit en deux familles, et la mesure ne se corrige pas (2026-08-04)
+
+### Contexte
+
+L'étape 4.1.3 ajoute `robust_stats` (médiane + MAD). C'est la **deuxième** méthode ajoutée au contrat
+des connecteurs en deux étapes, et 4.1.4 (fraîcheur) en ajoutera une troisième. Défendre chaque ajout
+au cas par cas finirait par ne plus rien défendre du tout : il fallait une ligne, pas une suite
+d'exceptions.
+
+### Décision 10a — méthodes de table, méthodes de colonne
+
+Le contrat se lit désormais en deux familles, et ce qui les sépare est le **coût** :
+
+| Famille | Méthodes | Coût |
+|---|---|---|
+| **de table** | `list_tables`, `get_schema`, `profile` | un balayage, tout ce qu'on en tire d'un coup |
+| **de colonne** | `top_values`, `robust_stats` | une requête **par colonne**, donc à la demande |
+
+C'est la généralisation de la décision 9a, et elle répond d'avance à la question « jusqu'où le contrat
+va-t-il grossir ? » : une méthode de colonne s'ajoute quand une mesure coûte un passage dédié *et* n'a
+de sens que sur certaines colonnes. Un top-K coûte un `GROUP BY` par colonne ; une médiane coûte un
+tri. Les imposer à toutes multiplierait le coût du profilage par le nombre de colonnes, pour un
+résultat sans intérêt (le top-K d'un identifiant) ou impossible (la médiane d'un texte libre).
+
+Conséquence, déjà assumée en 9a et qui vaut pour toute la famille : **quelles colonnes méritent quelle
+mesure est une décision d'appelant**, et le vrai critère viendra de la caractérisation par rôle (4.2).
+
+### Décision 10b — la mesure constate, elle ne se corrige pas
+
+Une colonne constante sur un lot a un MAD nul. En 4.3, comparer le jour à l'historique en divisant par
+le MAD produira une division par zéro — et la roadmap prévoit depuis le début un **plancher** pour ce
+cas.
+
+Ce plancher n'est **pas** appliqué dans la mesure. `robust_stats` rend `mad: 0.0`, parce que c'est ce
+qui a été observé. Le plancher est un réglage de *détection* : il appartient à `detect`, avec les
+seuils, et il rejoindra `agent/config.py`.
+
+La règle générale, qui vaut aussi pour `coverage` en 9b et pour le `k` de `top_values` :
+
+> **Une mesure qui se corrige elle-même ment sur ce qu'elle a vu.** Un lecteur du profil ne peut plus
+> distinguer « la colonne est constante » de « la colonne varie très peu », et l'information est perdue
+> pour toujours — y compris pour les usages qu'on n'a pas prévus.
+
+### Ce que ça coûte, et qu'on assume
+
+`detect` devra penser au plancher, et rien ne l'y oblige aujourd'hui. C'est un report volontaire, pas
+un oubli : la roadmap 4.3 le porte déjà noir sur blanc, et le premier calcul d'écart le rencontrera.
+La garantie est faible tant que 4.3 n'est pas écrite — c'est à dire, pas à masquer.
+
+### Trois pièges techniques rencontrés, consignés parce qu'ils se reproduiront
+
+1. **`TRY_CAST` de Snowflake n'accepte qu'une source texte.** L'appliquer à une colonne déjà `NUMBER`
+   lève. Le type est lu dans `INFORMATION_SCHEMA` — qu'on interroge de toute façon pour résoudre la
+   casse — et le cast n'est posé que sur du texte. Un connecteur Postgres devra faire l'inverse
+   (`::numeric` échoue là où Snowflake tolère), donc la logique reste sous la couture.
+2. **Le MAD a besoin de la médiane avant de pouvoir se soustraire.** `MEDIAN(...) OVER ()` la répète
+   sur chaque ligne en un seul balayage, au lieu d'une seconde requête pour aller la chercher.
+3. **`SUM` sur zéro ligne rend `NULL`, pas `0`.** Sur un lot vide, `int(None)` tuerait le run — celui-là
+   même qui devrait signaler que le lot est vide.
+
+### Un effet de bord utile : le VARCHAR de Bronze devient un signal
+
+Bronze est en texte par construction (phase 2.1), donc les nombres y sont *écrits*. `TRY_CAST` rend
+`NULL` sur ce qui n'est pas lisible plutôt que d'échouer — et compter ces `NULL` donne `numeric_rate`,
+la part des valeurs renseignées qui se laissent lire comme un nombre. Il vaut 1,0 sur une colonne
+saine ; s'il tombe à 0,7, un tiers des valeurs a cessé d'être numérique. C'est une **dérive de
+format**, détectable pour rien puisqu'il fallait compter de toute façon.
+
+Cette mesure n'était pas au plan. Elle est apparue en traitant une contrainte (« `AVG` échouerait sur
+Bronze ») au lieu de la contourner.
+
 ## Question ouverte — l'amendement du registre (soulevée le 2026-08-03)
 
 Le registre `datasets/<dataset>.yaml` déclare les tables à surveiller. Il peut donc, lui aussi,

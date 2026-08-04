@@ -135,7 +135,7 @@ def test_connecteur_inconnu_nomme_les_disponibles():
 
 
 class ConnecteurJouet:
-    """Un connecteur en mémoire — les quatre méthodes du contrat, aucune base.
+    """Un connecteur en mémoire — les deux familles du contrat, aucune base.
 
     Il prouve deux choses à la fois : que le contrat des connecteurs tient sans
     classe abstraite, et que rien au-dessus de `agent/connectors/` ne suppose
@@ -190,6 +190,24 @@ class ConnecteurJouet:
             "top": [{"value": v, "count": c} for v, c in retenues],
         }
 
+    def robust_stats(self, table, column, batch_column=None, batch_id=None):
+        entree = self.TABLES.get(table)
+        if entree is None or not any(c["name"] == column for c in entree[0]):
+            return None
+        return {
+            "table": table,
+            "column": column,
+            "type": "NUMBER",
+            "batch_id": batch_id,
+            "non_null_count": 2,
+            "numeric_count": 2,
+            "numeric_rate": 1.0,
+            "median": 2500.0,
+            "mad": 500.0,
+            "min": 2000.0,
+            "max": 3000.0,
+        }
+
 
 JOUET = """
 name: jouet
@@ -221,6 +239,9 @@ def test_un_dataset_etranger_tourne_sans_toucher_au_code(registre_jouet):
     profil = connecteur.profile(table.name, table.batch_column, "lot-1")
     assert profil["row_count"] == 3
     assert "salaire_brut" in profil["columns"]
+    # les deux familles du contrat, sur un backend qui n'est pas une base
+    assert connecteur.top_values(table.name, "matricule", 2)["top"]
+    assert connecteur.robust_stats(table.name, "salaire_brut")["median"] == 2500.0
 
 
 def test_une_table_declaree_absente_ne_fait_pas_lever(registre_jouet):
@@ -235,6 +256,7 @@ def test_une_table_declaree_absente_ne_fait_pas_lever(registre_jouet):
     assert connecteur.get_schema(absente.name) is None
     assert connecteur.profile(absente.name, absente.batch_column, "lot-1") is None
     assert connecteur.top_values(absente.name, "matricule", 5) is None
+    assert connecteur.robust_stats(absente.name, "matricule") is None
     # et elle est bien déclarée : c'est l'écart déclaré/présent qui fait l'incident
     assert absente.name not in connecteur.list_tables()
 
@@ -533,6 +555,169 @@ def test_un_k_absurde_est_refuse(monkeypatch):
     connecteur, _ = brancher(monkeypatch, [COLONNES, VILLES])
     with pytest.raises(ValueError, match="k"):
         connecteur.top_values("RH.EMPLOYES", "matricule", 0, "_batch_id", "lot-1")
+
+
+# ---------------------------------------------------------------------------
+# `robust_stats` — médiane + MAD, et le VARCHAR de Bronze devenu signal
+# ---------------------------------------------------------------------------
+
+# (renseignés, numériques, médiane, MAD, min, max)
+SALAIRES = [(10, 10, 2000.0, 150.0, 1000.0, 9000.0)]
+
+
+def test_les_stats_sont_robustes_et_pas_moyennes(monkeypatch):
+    """Médiane + MAD, jamais AVG + STDDEV.
+
+    Ce n'est pas une préférence de statisticien : avec moyenne + σ, l'anomalie
+    du J60 entre dans l'historique, gonfle σ, et la récidive du J85 tombe *dans*
+    la nouvelle normale. La référence se contaminerait elle-même.
+    """
+    connecteur, curseur = brancher(monkeypatch, [COLONNES, SALAIRES])
+
+    fiche = connecteur.robust_stats("RH.EMPLOYES", "salaire_brut", "_batch_id", "lot-1")
+
+    assert fiche["median"] == 2000.0
+    assert fiche["mad"] == 150.0
+    assert "MEDIAN(" in curseur.sql
+    assert "AVG(" not in curseur.sql and "STDDEV" not in curseur.sql
+
+
+def test_le_mad_se_calcule_contre_la_mediane_du_lot(monkeypatch):
+    """MAD = médiane(|x − médiane(x)|) : il faut la médiane **avant** de la soustraire.
+
+    D'où la fenêtre `MEDIAN(...) OVER ()`, qui la répète sur chaque ligne en un
+    seul balayage — au lieu d'une seconde requête pour aller la chercher.
+    """
+    connecteur, curseur = brancher(monkeypatch, [COLONNES, SALAIRES])
+    connecteur.robust_stats("RH.EMPLOYES", "salaire_brut", "_batch_id", "lot-1")
+
+    assert "MEDIAN(ABS(v - m))" in curseur.sql
+    assert "OVER ()" in curseur.sql
+
+
+def test_bronze_est_relu_en_nombre_sans_faire_echouer_la_requete(monkeypatch):
+    """Tout Bronze est VARCHAR (phase 2.1) : `AVG` y échouerait franchement.
+
+    `TRY_CAST` rend NULL sur ce qui n'est pas lisible au lieu de lever — une
+    valeur illisible est **comptée**, pas fatale.
+    """
+    connecteur, curseur = brancher(monkeypatch, [COLONNES, SALAIRES])
+    connecteur.robust_stats("RH.EMPLOYES", "matricule", "_batch_id", "lot-1")
+
+    assert 'TRY_CAST("MATRICULE" AS DOUBLE)' in curseur.sql
+
+
+def test_une_colonne_deja_numerique_n_est_pas_castee(monkeypatch):
+    """Piège Snowflake : `TRY_CAST` **n'accepte qu'une source texte**.
+
+    L'appliquer à une colonne déjà `NUMBER` lève. Le type vient de
+    `INFORMATION_SCHEMA`, qu'on interroge de toute façon pour résoudre la casse.
+    """
+    connecteur, curseur = brancher(monkeypatch, [COLONNES, SALAIRES])
+    connecteur.robust_stats("RH.EMPLOYES", "salaire_brut", "_batch_id", "lot-1")
+
+    assert "TRY_CAST" not in curseur.sql
+    assert 'MEDIAN("SALAIRE_BRUT") OVER ()' in curseur.sql
+
+
+def test_le_taux_numerique_est_une_mesure_de_derive_de_format(monkeypatch):
+    """Sur Bronze, « combien de valeurs se laissent lire comme un nombre » est
+    une information : 10 renseignées dont 7 numériques = 30 % de format cassé."""
+    connecteur, _ = brancher(monkeypatch, [COLONNES, [(10, 7, 50.0, 5.0, 1.0, 99.0)]])
+
+    fiche = connecteur.robust_stats("RH.EMPLOYES", "matricule", "_batch_id", "lot-1")
+    assert fiche["non_null_count"] == 10
+    assert fiche["numeric_count"] == 7
+    assert fiche["numeric_rate"] == 0.7
+
+
+def test_une_colonne_qui_ne_peut_pas_porter_de_nombre_n_est_pas_lue(monkeypatch):
+    """Le schéma suffit à répondre : scanner la table pour l'apprendre serait
+    payer un balayage pour rien."""
+    dates = [("EMBAUCHE", "DATE", 1)]
+    connecteur, curseur = brancher(monkeypatch, [dates])
+
+    fiche = connecteur.robust_stats("RH.EMPLOYES", "embauche")
+    assert fiche["type"] == "DATE"
+    assert fiche["median"] is None and fiche["non_null_count"] is None
+    assert len(curseur.appels) == 1, "aucune requête d'agrégation n'est partie"
+
+
+def test_un_mad_nul_est_rendu_tel_quel(monkeypatch):
+    """Une colonne constante a un MAD de 0. C'est un **fait**, pas une valeur à
+    corriger : le plancher qui évitera la division par zéro est un réglage de
+    détection, il appartient à `detect` (4.3). Une mesure qui se corrige
+    elle-même ment sur ce qu'elle a vu."""
+    connecteur, _ = brancher(monkeypatch, [COLONNES, [(10, 10, 42.0, 0.0, 42.0, 42.0)]])
+
+    fiche = connecteur.robust_stats("RH.EMPLOYES", "salaire_brut", "_batch_id", "l-1")
+    assert fiche["mad"] == 0.0
+
+
+def test_les_bornes_sont_numeriques_et_non_lexicographiques(monkeypatch):
+    """Ce que `profile` ne peut pas donner sur Bronze : là-bas `"8000" < "90"`.
+
+    C'est ce qui rend enfin exploitable le cas « une seule ligne à 8000 dans une
+    colonne à [1–100] » — elle ne déplace presque pas la médiane, mais elle fait
+    exploser le max.
+    """
+    connecteur, curseur = brancher(
+        monkeypatch, [COLONNES, [(10, 10, 50.0, 5.0, 1.0, 8000.0)]]
+    )
+
+    fiche = connecteur.robust_stats("RH.EMPLOYES", "matricule", "_batch_id", "lot-1")
+    assert fiche["max"] == 8000.0
+    assert "MAX(v)" in curseur.sql, (
+        "le max porte sur la lecture numérique, pas sur le texte"
+    )
+
+
+def test_les_stats_ne_rendent_aucune_valeur_individuelle(monkeypatch):
+    """Règle R2, et la frontière est **la projection externe**, pas la sous-requête.
+
+    Première version de ce test : « la sous-requête ne projette pas la colonne
+    nue ». Faux — sur une colonne déjà numérique elle la projette forcément (il
+    faut bien lire les valeurs pour les trier), et le test est devenu rouge sur
+    du code juste. La sous-requête ne **quitte jamais la base** : ce qui traverse
+    le réseau, c'est le SELECT du dessus.
+
+    L'invariant correct est donc celui de `profile` : toute projection rendue au
+    client est une agrégation. Six scalaires sortent, jamais une ligne.
+    """
+    connecteur, curseur = brancher(monkeypatch, [COLONNES, SALAIRES])
+    connecteur.robust_stats("RH.EMPLOYES", "salaire_brut", "_batch_id", "lot-1")
+
+    exterieur = curseur.sql.split(" FROM (")[0].removeprefix("SELECT ")
+    nues = [
+        p
+        for p in exterieur.split(", ")
+        if not re.match(r"(SUM|COUNT|MEDIAN|MIN|MAX)\(", p)
+    ]
+    assert not nues, f"projection non agrégée dans les stats : {nues}"
+    assert 'IFF("SALAIRE_BRUT" IS NULL, 0, 1)' in curseur.sql, (
+        "les renseignés se comptent sur un drapeau"
+    )
+
+
+def test_stats_sur_un_lot_vide(monkeypatch):
+    """`SUM` sur zéro ligne rend NULL, pas 0 — sans quoi `int(None)` tue le run."""
+    connecteur, _ = brancher(
+        monkeypatch, [COLONNES, [(None, 0, None, None, None, None)]]
+    )
+
+    fiche = connecteur.robust_stats("RH.EMPLOYES", "salaire_brut", "_batch_id", "l-1")
+    assert fiche["non_null_count"] == 0
+    assert fiche["numeric_rate"] == 0.0
+    assert fiche["median"] is None
+
+
+def test_stats_sur_une_colonne_ou_une_table_absente(monkeypatch):
+    """Même règle que `top_values` : constater, ne pas trébucher."""
+    connecteur, _ = brancher(monkeypatch, [COLONNES])
+    assert connecteur.robust_stats("RH.EMPLOYES", "colonne_envolee") is None
+
+    connecteur, _ = brancher(monkeypatch, [[]])
+    assert connecteur.robust_stats("RH.DISPARUE", "salaire_brut") is None
 
 
 def test_list_tables_ignore_la_memoire_de_l_agent(monkeypatch):

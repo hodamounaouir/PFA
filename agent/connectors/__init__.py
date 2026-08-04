@@ -1,27 +1,44 @@
 """Les connecteurs : la seule porte entre l'agent et une base (phase 4.0).
 
-## Le contrat
+## Le contrat, en deux familles
 
-Un connecteur expose **quatre méthodes**, et l'agent ne lui demande jamais rien
-d'autre :
+Un connecteur expose ces méthodes, et l'agent ne lui demande jamais rien d'autre.
+Elles se lisent en **deux familles**, et la ligne qui les sépare est le *coût* :
+
+**Méthodes de table** — un balayage, tout ce qu'on peut en tirer d'un coup :
 
     list_tables()                              -> list[str]        les tables réellement présentes
     get_schema(table)                          -> list[dict]|None  les colonnes, ou None si absente
     profile(table, batch_column, batch_id)     -> dict|None        des agrégats, ou None si absente
-    top_values(table, column, k,               -> dict|None        les k valeurs les plus fréquentes,
-               batch_column, batch_id)                             ou None si table/colonne absente
+
+**Méthodes de colonne** — une requête *par colonne*, donc demandées à la
+demande, sur les seules colonnes où la réponse a du sens :
+
+    top_values(table, column, k,               -> dict|None        les k valeurs les plus fréquentes
+               batch_column, batch_id)
+    robust_stats(table, column,                -> dict|None        médiane, MAD, bornes numériques
+                 batch_column, batch_id)
+
+Les deux familles rendent `None` sur ce qui n'existe pas — table absente, et
+pour les méthodes de colonne, colonne absente.
 
 `profile` reçoit **la colonne de lot et sa valeur**, jamais un fragment de SQL.
 La nuance n'est pas cosmétique : si l'appelant passait `"_batch_id = '2018-04-29'"`,
 du SQL existerait au-dessus de cette couche — c'est-à-dire exactement ce que le
 socle sert à empêcher. Le connecteur reçoit des données, il fabrique le SQL.
 
-**Pourquoi `top_values` est une méthode et non un cas de `profile`** (phase 4.1.2) :
-`profile` fait *un* passage sur la table et rend la même chose pour toutes les
-colonnes. Un top-K coûte un `GROUP BY` **par colonne** — l'imposer à toutes
-multiplierait le coût du profilage par le nombre de colonnes, pour un résultat
-sans intérêt sur un identifiant ou du texte libre. Les deux ne se paient pas au
-même prix, donc elles ne se demandent pas ensemble.
+**Pourquoi cette séparation plutôt qu'un `profile` qui rendrait tout**
+(phase 4.1.2, [ADR 010](../../docs/adr/010-agent-generique.md) décision 9a) :
+`profile` fait *un* passage et rend la même chose pour toutes les colonnes. Un
+top-K coûte un `GROUP BY` par colonne ; une médiane coûte un tri par colonne.
+Les imposer à toutes multiplierait le coût du profilage par le nombre de
+colonnes — pour un résultat sans intérêt (le top-K d'un identifiant) ou
+impossible (la médiane d'un texte libre). Ce qui ne se paie pas au même prix ne
+se demande pas ensemble.
+
+Conséquence assumée : **quelles colonnes méritent quelle mesure devient une
+décision d'appelant.** Le critère provisoire est celui de 4.1 ; le vrai vient de
+la caractérisation par rôle de 4.2.
 
 ## Fermer, quand il y a quelque chose à fermer
 

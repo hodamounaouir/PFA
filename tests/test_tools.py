@@ -17,8 +17,9 @@ import pytest
 
 from agent.connectors.ops import MemoireOps, _cle_de_table
 from agent.registry import Registre, TableDeclaree
-from agent.tools import read_schema_history, top_values
-from agent.tools.top_values import TOP_K_DEFAUT, TableNonDeclaree
+from agent.tools import read_schema_history, robust_stats, top_values
+from agent.tools._connecteur import TableNonDeclaree
+from agent.tools.top_values import TOP_K_DEFAUT
 
 RACINE = Path(__file__).resolve().parent.parent
 
@@ -27,7 +28,9 @@ RACINE = Path(__file__).resolve().parent.parent
 # désigne donc le **tool**, pas le module — un `monkeypatch` dessus ne
 # remplacerait rien, silencieusement. On va chercher le module explicitement.
 tool_mod = importlib.import_module("agent.tools.read_schema_history")
-top_mod = importlib.import_module("agent.tools.top_values")
+# Le socle commun des tools qui lisent la base : c'est **lui** qui charge le
+# registre, donc c'est lui qu'on remplace — pas chaque tool.
+socle_mod = importlib.import_module("agent.tools._connecteur")
 
 
 # Ce que l'ingestion a réellement écrit en phase 2.1 : nom de fichier CSV,
@@ -193,7 +196,7 @@ def test_le_tool_est_bien_un_tool():
 
 
 # ---------------------------------------------------------------------------
-# `top_values` : le tool résout son connecteur lui-même
+# Les tools qui lisent la base résolvent leur connecteur eux-mêmes
 # ---------------------------------------------------------------------------
 
 REGISTRE_FACTICE = Registre(
@@ -220,6 +223,12 @@ class ConnecteurEspion:
             raise RuntimeError("Snowflake indisponible")
         return {"table": table, "column": column, "top": [], "coverage": 0.0}
 
+    def robust_stats(self, table, column, batch_column=None, batch_id=None):
+        self.appels.append((table, column, batch_column, batch_id))
+        if self.plante:
+            raise RuntimeError("Snowflake indisponible")
+        return {"table": table, "column": column, "median": 42.0, "mad": 1.5}
+
     def close(self):
         self.ferme = True
 
@@ -230,7 +239,7 @@ def espion(monkeypatch):
     from agent import connectors
 
     connecteur = ConnecteurEspion()
-    monkeypatch.setattr(top_mod, "charger", lambda nom: REGISTRE_FACTICE)
+    monkeypatch.setattr(socle_mod, "charger", lambda nom: REGISTRE_FACTICE)
     connectors.enregistrer("jouet_top", lambda: connecteur)
     yield connecteur
     connectors._FABRIQUES.pop("jouet_top", None)
@@ -288,7 +297,7 @@ def test_le_connecteur_est_ferme_meme_si_la_lecture_echoue(monkeypatch):
     from agent import connectors
 
     connecteur = ConnecteurEspion(plante=True)
-    monkeypatch.setattr(top_mod, "charger", lambda nom: REGISTRE_FACTICE)
+    monkeypatch.setattr(socle_mod, "charger", lambda nom: REGISTRE_FACTICE)
     connectors.enregistrer("jouet_top", lambda: connecteur)
     try:
         with pytest.raises(RuntimeError):
@@ -304,6 +313,51 @@ def test_top_values_est_bien_un_tool():
     assert top_values.name == "top_values"
     champs = set(top_values.args_schema.model_fields)
     assert {"dataset", "table", "column", "batch_id", "k"} == champs
+
+
+# ---------------------------------------------------------------------------
+# `robust_stats` (4.1.3)
+# ---------------------------------------------------------------------------
+
+
+def test_robust_stats_passe_par_le_meme_socle(espion):
+    """Écrit à la deuxième occurrence : les deux tools font les mêmes gestes.
+
+    Ce qui compte n'est pas d'économiser douze lignes, c'est que le message
+    d'erreur d'une table non déclarée et la garantie de fermeture existent à un
+    seul endroit — donc qu'un troisième tool (4.1.4) ne puisse pas les oublier
+    à moitié.
+    """
+    robust_stats.invoke(
+        {
+            "dataset": "jouet",
+            "table": "RH.EMPLOYES",
+            "column": "salaire",
+            "batch_id": "l-1",
+        }
+    )
+    assert espion.appels == [("RH.EMPLOYES", "salaire", "_lot", "l-1")]
+
+
+def test_robust_stats_sur_une_table_non_declaree(espion):
+    with pytest.raises(TableNonDeclaree, match="RH.EMPLOYES"):
+        robust_stats.invoke(
+            {"dataset": "jouet", "table": "RH.INCONNUE", "column": "salaire"}
+        )
+    assert espion.appels == []
+
+
+def test_robust_stats_un_batch_vide_veut_dire_toute_la_table(espion):
+    robust_stats.invoke(
+        {"dataset": "jouet", "table": "MARTS.FCT_TOTAL", "column": "salaire"}
+    )
+    assert espion.appels[-1][2:] == (None, None), "ni colonne de lot, ni lot"
+
+
+def test_robust_stats_est_bien_un_tool():
+    assert robust_stats.name == "robust_stats"
+    champs = set(robust_stats.args_schema.model_fields)
+    assert {"dataset", "table", "column", "batch_id"} == champs
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,35 @@ SCHEMAS_INTERNES = ("OPS", "INFORMATION_SCHEMA")
 # Ce filtre est la seule chose qui sépare une faute de frappe d'une injection.
 IDENTIFIANT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 
+# Les types qui peuvent porter un nombre (phase 4.1.3). Deux familles, et la
+# distinction n'est pas décorative : `TRY_CAST` de Snowflake **n'accepte qu'une
+# source texte** — l'appliquer à une colonne déjà typée `NUMBER` lève. On lit
+# donc le type dans `INFORMATION_SCHEMA` (qu'on interroge déjà pour résoudre la
+# casse) et on ne caste que ce qui en a besoin.
+#
+# Tout ce qui n'est ni l'un ni l'autre — DATE, TIMESTAMP, BOOLEAN, VARIANT — ne
+# porte pas de nombre : la question n'a pas lieu d'être posée à la base.
+TYPES_NUMERIQUES = frozenset(
+    {
+        "NUMBER",
+        "DECIMAL",
+        "NUMERIC",
+        "INT",
+        "INTEGER",
+        "BIGINT",
+        "SMALLINT",
+        "TINYINT",
+        "BYTEINT",
+        "FLOAT",
+        "FLOAT4",
+        "FLOAT8",
+        "DOUBLE",
+        "DOUBLE PRECISION",
+        "REAL",
+    }
+)
+TYPES_TEXTE = frozenset({"TEXT", "VARCHAR", "CHAR", "CHARACTER", "STRING"})
+
 
 class TableMalNommee(Exception):
     """Le nom déclaré n'est pas un `SCHEMA.TABLE` exploitable."""
@@ -105,7 +134,7 @@ def _json_sur(valeur):
 
 
 class ConnecteurSnowflake:
-    """Accès en lecture à la base surveillée. Quatre méthodes, pas une de plus."""
+    """Accès en lecture à la base surveillée. Trois méthodes de table, deux de colonne."""
 
     def __init__(self, base: Optional[str] = None):
         load_dotenv(RACINE / ".env")
@@ -130,7 +159,7 @@ class ConnecteurSnowflake:
             self._conn.close()
             self._conn = None
 
-    # --- les quatre méthodes du contrat ------------------------------------
+    # --- méthodes de table : un balayage, tout ce qu'on en tire ------------
 
     def list_tables(self) -> list[str]:
         """Les tables et vues réellement présentes, en `SCHEMA.TABLE`.
@@ -235,6 +264,8 @@ class ConnecteurSnowflake:
             "columns": fiche,
         }
 
+    # --- méthodes de colonne : une requête par colonne, donc à la demande ---
+
     def top_values(
         self,
         table: str,
@@ -338,6 +369,131 @@ class ConnecteurSnowflake:
                 round(sum(v["count"] for v in top) / total, 6) if total else 0.0
             ),
             "top": top,
+        }
+
+    def robust_stats(
+        self,
+        table: str,
+        column: str,
+        batch_column: Optional[str] = None,
+        batch_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Médiane et MAD d'une colonne — **pas** moyenne et écart-type (4.1.3).
+
+        La moyenne et σ se laissent déplacer par ce qu'on cherche justement à
+        détecter. L'anomalie du J60 entrerait dans l'historique, gonflerait σ, et
+        la récidive du J85 paraîtrait *moins* grave qu'elle ne l'est : la
+        référence se contaminerait elle-même. La médiane et le MAD
+        (`médiane(|x − médiane(x)|)`) ne bougent pas pour une poignée de valeurs
+        aberrantes — c'est toute la raison de les préférer.
+
+        Rend `None` si la table ou la colonne n'existe pas — même règle que
+        `top_values` : constater, ne pas trébucher.
+
+        Forme rendue :
+
+            {"table", "column", "type", "batch_id",
+             "non_null_count": int|None,   valeurs renseignées du lot
+             "numeric_count": int|None,    celles qui se laissent lire comme un nombre
+             "numeric_rate": float|None,   le rapport des deux
+             "median", "mad", "min", "max": float|None}
+
+        **`numeric_rate` est un signal, pas un détail de plomberie.** En Bronze
+        tout est VARCHAR (phase 2.1) : une colonne de montants y contient des
+        nombres *écrits en texte*, et rien ne garantit qu'ils le restent. Un taux
+        qui tombe de 1,0 à 0,7 dit qu'un tiers des valeurs a cessé d'être lisible
+        comme un nombre — c'est une dérive de format, et elle se voit ici pour
+        rien puisqu'il fallait compter de toute façon.
+
+        Sur une colonne dont le **type** ne peut pas porter de nombre (DATE,
+        TIMESTAMP, BOOLEAN…), toutes les mesures valent `None` et **aucune
+        requête n'est émise** : le schéma suffit à répondre, et scanner la table
+        pour l'apprendre serait payer un balayage pour rien.
+
+        `min`/`max` sont ici **numériques**, là où ceux de `profile` sont
+        lexicographiques sur Bronze (`"8000" < "90"`). C'est ce qui rend enfin
+        exploitable le cas « une seule ligne à 8000 dans une colonne à [1–100] » :
+        elle ne déplace presque pas la médiane, mais elle fait exploser le max.
+
+        Un MAD nul est rendu tel quel. C'est un **fait** — la colonne est
+        constante sur ce lot — et le plancher qui évitera la division par zéro
+        est un réglage de détection : il appartient à `detect` (4.3), pas à la
+        mesure. Une mesure qui se corrige elle-même ment sur ce qu'elle a vu.
+        """
+        colonnes = self.get_schema(table)
+        if colonnes is None:
+            return None
+
+        entree = next(
+            (c for c in colonnes if c["name"].upper() == column.upper()), None
+        )
+        if entree is None:
+            return None
+
+        reelle, type_sql = entree["name"], entree["type"].upper()
+        fiche = {
+            "table": table,
+            "column": reelle,
+            "type": type_sql,
+            "batch_id": batch_id,
+        }
+        mesures = (
+            "non_null_count",
+            "numeric_count",
+            "numeric_rate",
+            "median",
+            "mad",
+            "min",
+            "max",
+        )
+
+        if type_sql not in TYPES_NUMERIQUES and type_sql not in TYPES_TEXTE:
+            # Rien mesuré, et rien à mesurer : la réponse est dans le schéma.
+            return {**fiche, **dict.fromkeys(mesures)}
+
+        # `TRY_CAST` uniquement sur du texte : Snowflake le refuse sur une
+        # colonne déjà numérique. Sur Bronze il rend NULL au lieu de lever, ce
+        # qui est exactement ce qu'il faut — une valeur illisible est comptée,
+        # pas fatale.
+        lecture = (
+            f'"{reelle}"'
+            if type_sql in TYPES_NUMERIQUES
+            else f'TRY_CAST("{reelle}" AS DOUBLE)'
+        )
+        noms = [c["name"] for c in colonnes]
+        schema, nom = _decouper(table)
+        where, parametres = self._filtre_de_lot(table, noms, batch_column, batch_id)
+
+        # La sous-requête ne projette **aucune valeur** : `renseigne` est un
+        # drapeau 0/1, `v` est la lecture numérique, `m` la médiane répétée sur
+        # chaque ligne. Le MAD a besoin de la médiane *avant* de pouvoir se
+        # calculer — d'où la fenêtre, qui l'obtient en un seul balayage plutôt
+        # qu'en deux requêtes.
+        curseur = self._curseur()
+        curseur.execute(
+            f"SELECT SUM(renseigne), COUNT(v), MEDIAN(v), MEDIAN(ABS(v - m)), "
+            f"MIN(v), MAX(v) FROM ("
+            f'  SELECT IFF("{reelle}" IS NULL, 0, 1) AS renseigne, '
+            f"         {lecture} AS v, MEDIAN({lecture}) OVER () AS m "
+            f"  FROM {schema}.{nom}{where})",
+            parametres,
+        )
+        ligne = curseur.fetchone() or (None,) * 6
+        renseignes, numeriques, mediane, mad, mini, maxi = ligne
+
+        # `SUM` sur zéro ligne rend NULL, pas 0 : un lot vide n'est pas une
+        # absence de réponse, c'est « aucune valeur renseignée ».
+        renseignes = int(renseignes or 0)
+        numeriques = int(numeriques or 0)
+        return {
+            **fiche,
+            "non_null_count": renseignes,
+            "numeric_count": numeriques,
+            "numeric_rate": round(numeriques / renseignes, 6) if renseignes else 0.0,
+            "median": _json_sur(mediane),
+            "mad": _json_sur(mad),
+            "min": _json_sur(mini),
+            "max": _json_sur(maxi),
         }
 
     # --- interne -----------------------------------------------------------

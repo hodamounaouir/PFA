@@ -43,8 +43,7 @@ from typing import Optional
 
 from langchain_core.tools import tool
 
-from agent import connectors
-from agent.registry import charger
+from agent.tools._connecteur import connecteur_pour
 
 # Combien de valeurs on regarde. C'est un réglage de **détection**, pas une
 # propriété du moteur — d'où sa place ici plutôt que dans le connecteur, et son
@@ -54,10 +53,6 @@ from agent.registry import charger
 # grande ville s'y retrouvent toutes les deux (le cas São Paulo), assez étroit
 # pour qu'une colonne à longue traîne se trahisse par un `coverage` faible.
 TOP_K_DEFAUT = 20
-
-
-class TableNonDeclaree(Exception):
-    """On demande le top-K d'une table que le registre ne surveille pas."""
 
 
 @tool
@@ -78,26 +73,7 @@ def top_values(
     sont déjà comptés par le profil. Si `top` contient moins de `k` entrées,
     c'est qu'on a vu **toute** la colonne et pas seulement sa tête.
     """
-    registre = charger(dataset)
-    declaree = registre.table(table)
-    if declaree is None:
-        # Une table absente du registre est un fait que `detect` exploite
-        # (famille *inventaire*), mais ici c'est l'appelant qui se trompe : on
-        # ne sait pas quelle colonne porte son lot, donc on profilerait la table
-        # entière en croyant filtrer un jour — et l'anomalie cherchée se
-        # diluerait sans que personne ne le voie. Même raison qu'une
-        # `batch_column` fausse : erreur de déclaration, échec bruyant.
-        raise TableNonDeclaree(
-            f"{table!r} n'est pas déclarée dans le registre {dataset!r} — "
-            f"déclarées : {', '.join(registre.noms)}"
-        )
-
-    connecteur = connectors.ouvrir(registre.connector)
-    try:
+    with connecteur_pour(dataset, table) as (connecteur, declaree):
         return connecteur.top_values(
             table, column, k, declaree.batch_column, batch_id or None
         )
-    finally:
-        # Fermer même si la lecture échoue — un run interrompu ne doit pas
-        # laisser de session ouverte (cf. `connectors.fermer`).
-        connectors.fermer(connecteur)
