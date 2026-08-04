@@ -283,6 +283,91 @@ Le dialogue est conservé dans l'état, donc dans le journal, donc dans `INCIDEN
 pas « l'humain a approuvé », mais « l'humain a posé deux questions, obtenu ces réponses, **puis**
 approuvé ». C'est une meilleure réponse à *« et s'il approuve sans lire ? »* qu'un taux d'approbation.
 
+## Décision 7 — La couture plutôt que la classe abstraite (2026-08-03)
+
+### Contexte
+
+L'étape 4.0 prévoyait `agent/connectors/base.py` : une interface abstraite (`list_tables`,
+`get_schema`, `profile`) dont Snowflake serait la première implémentation, « les autres » suivant plus
+tard. En l'écrivant, deux vérifications ont fait tomber la prémisse :
+
+- **Postgres** ne viendra pas : l'[ADR 009](009-source-hybride-olist.md) l'a explicitement écarté ;
+- **l'API REST/FastAPI de l'objectif O1 n'est pas un connecteur d'agent** — c'est une source
+  d'*ingestion*, consommée par `ingestion/`, qui alimente Bronze. L'agent ne lira jamais cet endpoint :
+  il lit ce qui a atterri dans `RAW`. Confusion de catégorie, corrigée dans `PROGRESS.md`.
+
+Le projet n'a donc, dans son périmètre réel, **qu'un seul backend : Snowflake**. Écrire une classe
+abstraite pour une implémentation unique, c'est de la généralisation spéculative : payer aujourd'hui
+une souplesse dont on ne connaît pas encore la forme, et deviner probablement de travers.
+
+### Options envisagées
+
+- **(a) L'interface abstraite tout de suite.** Conforme au plan, mais une seule implémentation : la
+  forme de l'abstraction serait devinée, pas constatée.
+- **(b) La couture seule.** Tout le SQL vit sous `agent/connectors/`, un test échoue s'il en apparaît
+  ailleurs. Pas d'héritage, pas de classe de base.
+- **(c) L'interface + un second connecteur réel (CSV/pandas).** L'abstraction serait *validée* par deux
+  implémentations au lieu d'être supposée. Coût : ~1 jour.
+
+### Décision
+
+**Option (b).** `agent/connectors/__init__.py` tient une fabrique (nom → connecteur) et documente le
+contrat des trois méthodes ; `agent/connectors/snowflake.py` est le seul fichier de `agent/` où du SQL
+a le droit d'exister.
+
+### Pourquoi
+
+Ce qui protège la propriété « l'agent ne connaît pas sa base », ce n'est pas l'héritage — une classe de
+base n'empêche personne d'ouvrir une connexion à côté. C'est le test
+`test_aucun_sql_hors_des_connecteurs`, qui relit tout `agent/` à chaque exécution de la suite. La
+discipline qu'aurait imposée l'abstraction est imposée par un test, et un test ne se contourne pas par
+distraction.
+
+Détail qui compte : `profile()` reçoit `(batch_column, batch_id)` et **jamais un fragment de SQL**. Si
+l'appelant passait `"_batch_id = '2018-04-29'"`, du SQL existerait au-dessus de la couture — soit
+exactement ce que le socle sert à empêcher.
+
+### Ce que ça coûte, et qu'on assume
+
+La promesse de généricité change de portée. Ce qui est **démontré** aujourd'hui : l'agent est portable
+d'un *schéma* à l'autre — le test de généricité branche un dataset RH étranger à Olist via un connecteur
+en mémoire, sans qu'une ligne de `agent/` change. Ce qui reste **argumenté et non démontré** : la
+portabilité d'un *backend* à l'autre.
+
+L'option (c) reste ouverte et bon marché. C'est le seul endroit de la phase 4 où un jour de travail
+achète une réponse de soutenance en direct plutôt qu'une explication.
+
+### Ce qu'il faudra surveiller
+
+Le jour où un second backend arrive, extraire l'interface est un refactor mécanique d'un seul fichier,
+parce que la couture est déjà là. Si le refactor s'avère douloureux, c'est que du SQL avait fui — et le
+test l'aura dit avant.
+
+## Décision 8 — La mémoire de l'agent n'est pas derrière le connecteur (2026-08-03)
+
+### Contexte
+
+Deux bases jouent deux rôles différents, et les confondre était facile : le **système observé** (ce que
+le connecteur lit) et la **mémoire de l'agent** (`OPS._SCHEMA_HISTORY`, `OPS._PROFILES`,
+`OPS.INCIDENTS`).
+
+### Décision
+
+`OPS` ne passe pas par le connecteur, et `list_tables()` l'exclut explicitement.
+
+### Pourquoi
+
+Deux conséquences, l'une immédiate, l'autre structurelle :
+
+- **immédiate** — sans exclusion, la famille *inventaire* (4.3) verrait `INCIDENTS` et `_PROFILES`
+  comme des « tables nouvelles non déclarées » à chaque run : l'agent se découvrirait lui-même,
+  indéfiniment ;
+- **structurelle** — si la mémoire suivait le connecteur, surveiller une base Postgres voudrait dire y
+  écrire ses incidents. La mémoire se fragmenterait en autant de bases que de datasets, et l'objectif
+  O7 (« l'agent se souvient ») n'aurait plus de lieu où s'exercer.
+
+Le connecteur lit ce qu'on surveille ; la mémoire reste là où l'agent vit.
+
 ## Question ouverte — l'amendement du registre (soulevée le 2026-08-03)
 
 Le registre `datasets/<dataset>.yaml` déclare les tables à surveiller. Il peut donc, lui aussi,

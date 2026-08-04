@@ -1,0 +1,51 @@
+# Registre du dataset Olist — phase 4.0
+#
+# C'est le SEUL fichier à écrire pour brancher un dataset sur l'agent. Rien de ce
+# qui est ici n'apparaît dans `agent/` : ni un nom de table, ni un nom de schéma,
+# ni le nom du moteur. L'agent lit ce fichier, ouvre le connecteur qu'il désigne,
+# et travaille sur ce qu'on lui déclare.
+#
+# Ce qui est déclaré ici ne s'infère pas, et c'est assumé (ADR 010, décision 2) :
+#   - quelles tables méritent d'être surveillées (une base en contient toujours
+#     plus qu'on ne veut en surveiller) ;
+#   - quelle colonne identifie un lot (`batch_column`) — aucune convention de
+#     nommage universelle ne permet de la deviner ;
+#   - à quelle couche Medallion chaque table appartient.
+
+name: olist
+connector: snowflake
+
+tables:
+  # --- Bronze : le brut, tel qu'ingéré (phase 2.1) ------------------------
+  # Tout est VARCHAR par construction : Bronze accepte tout et ne type rien.
+  # Conséquence pour le profilage : min/max y sont **lexicographiques**, pas
+  # numériques. C'est en Silver que la comparaison de bornes prend son sens.
+  - {name: RAW.ORDERS,           layer: bronze, batch_column: _batch_id}
+  - {name: RAW.ORDER_ITEMS,      layer: bronze, batch_column: _batch_id}
+  - {name: RAW.ORDER_PAYMENTS,   layer: bronze, batch_column: _batch_id}
+  - {name: RAW.CUSTOMERS,        layer: bronze, batch_column: _batch_id}
+  # Référentiels : livrés en entier au J1, pas rejoués chaque jour. Ils portent
+  # quand même `_batch_id` (celui du J1) — c'est ce qui rend le filtre uniforme.
+  - {name: RAW.PRODUCTS,         layer: bronze, batch_column: _batch_id}
+  - {name: RAW.GEOLOCATION,      layer: bronze, batch_column: _batch_id}
+
+  # --- Silver : typé et nettoyé par dbt (phase 2.2) -----------------------
+  # `_batch_id` traverse Silver : les vues stg_ le propagent depuis RAW.
+  - {name: STAGING.STG_ORDERS,         layer: silver, batch_column: _batch_id}
+  - {name: STAGING.STG_ORDER_ITEMS,    layer: silver, batch_column: _batch_id}
+  - {name: STAGING.STG_ORDER_PAYMENTS, layer: silver, batch_column: _batch_id}
+  - {name: STAGING.STG_CUSTOMERS,      layer: silver, batch_column: _batch_id}
+  - {name: STAGING.STG_PRODUCTS,       layer: silver, batch_column: _batch_id}
+  - {name: STAGING.STG_GEOLOCATION,    layer: silver, batch_column: _batch_id}
+
+  # --- Gold : les agrégats métier (phase 2.2) -----------------------------
+  # `batch_column` absent : un agrégat est **reconstruit en entier** à chaque
+  # run, il n'a pas de notion de lot. Le connecteur profile alors toute la table,
+  # ce qui est le comportement correct ici — et non un cas dégradé.
+  - {name: MARTS.FCT_DAILY_SALES,         layer: gold}
+  - {name: MARTS.FCT_AVG_ORDER_VALUE,     layer: gold}
+  - {name: MARTS.FCT_DELIVERY_DELAYS,     layer: gold}
+  - {name: MARTS.FCT_SALES_BY_CITY_STATE, layer: gold}
+  # ⭐ Le démonstrateur du trou sémantique : `sao paulo` / `são paulo` / `sãopaulo`
+  # y éclatent en trois lignes. C'est la table que l'agent doit faire parler.
+  - {name: MARTS.FCT_GEOLOCATION_BY_CITY, layer: gold}
