@@ -660,6 +660,83 @@ Le critère provisoire de 4.1.5 donnait un top-K aux colonnes de dates peu vari�
 désormais `temporal` et ne reçoivent plus rien : leurs `min`/`max` **sont** déjà la fraîcheur. Un
 identifiant numérique, lui, ne reçoit plus de médiane.
 
+## Décision 13 — La découverte refuse de proposer plutôt qu'elle n'avertit (2026-08-04)
+
+### Contexte
+
+La décision 3 avait identifié le piège du contrat auto-généré : *« sur `geolocation_city`, il graverait
+`sao paulo` **et** `são paulo` comme deux valeurs légitimes — et le cas d'école du projet serait perdu
+avant même d'avoir commencé. »* Elle prescrivait le remède — faire tourner la détection de collisions
+*pendant* la découverte — sans dire ce qu'on fait de ce qu'on trouve. C'est ce que 4.2.2 tranche.
+
+### Décision 13a — retirer la clause, pas l'assortir d'un avertissement
+
+Quand la découverte constate une collision sémantique, elle **ne propose pas** `accepted_values`. Elle
+n'écrit pas la liste avec un avertissement à côté.
+
+La nuance décide de tout : **un avertissement se survole, une clause absente ne peut pas être approuvée
+par distraction.** Le `DESIGN.md` anticipe déjà la question de jury « et si l'humain approuve sans
+lire ? » ; un contrat qui contient la mauvaise clause plus un post-it n'y répond pas. Un contrat qui ne
+la contient pas force la conversation.
+
+Trois situations produisent ce refus, et la troisième n'était pas prévue :
+
+| Situation | Ce qui n'est pas proposé | Ce que ça évite |
+|---|---|---|
+| collision sémantique observée | `accepted_values` | graver l'anomalie comme légitime |
+| **top-K tronqué** (`coverage < 1`) | `accepted_values` | un contrat qui **crie sur des données saines** |
+| colonne de texte libre | `accepted_values` | faire sortir de la donnée dans un fichier versionné (R2) |
+
+**Le deuxième est le plus sournois**, et il découle directement de la décision 9b. `top_values` rend
+les *K* valeurs les plus **fréquentes** ; si elles ne couvrent que 60 % des lignes, les 40 % restants
+sont des valeurs parfaitement légitimes, absentes de la liste. Un contrat construit là-dessus crierait
+dès le lendemain sur des données saines — et on apprendrait à ignorer ses alertes, ce qui est pire que
+de n'en avoir aucune. C'est `coverage`, introduit en 4.1.2 pour une raison de confidentialité, qui
+rend ce refus possible.
+
+### Décision 13b — proposer ce qui devrait être vrai, même quand c'est déjà faux
+
+Symétriquement : `unique: true` est proposé sur un identifiant qui porte déjà des doublons, et
+`no_semantic_collisions: true` sur une colonne qui en porte. Avec, à chaque fois, un avertissement
+chiffré.
+
+Ce n'est pas une contradiction avec 13a. Un contrat dit ce qui **devrait** être vrai ; l'avertissement
+dit que ça ne l'est pas encore. Escamoter la clause parce qu'elle est violée reviendrait à répondre à
+la place de l'humain à la seule question qui compte : *nettoie-t-on, ou accepte-t-on ?*
+
+La règle générale qui se dégage :
+
+> **Ce qui relève du constat est proposé, y compris quand il dérange. Ce qui relève de la preuve est
+> retiré quand la preuve manque.**
+
+### Décision 13c — le repli ne supprime pas les espaces
+
+`normaliser()` replie casse, accents et espaces multiples. Pas les espaces eux-mêmes.
+
+`sãopaulo` échappe donc au repli — limite connue, assumée, testée. La supprimer attraperait cette
+forme, mais fusionnerait `arco verde` et `arcoverde`, **deux communes brésiliennes distinctes**. Un
+détecteur qui invente des égalités est pire que le désordre qu'il signale : ici, il ferait retirer du
+contrat des valeurs légitimes.
+
+Le choix est sans coût sur le corrigé : les 18 variantes injectées au J50 sont **toutes accentuelles**,
+et les variantes d'espace réelles du dataset ont été repliées dans la fenêtre de référence par la
+phase 1.5.
+
+### Écart au plan assumé
+
+Le plan prévoyait 4.2.2 (proposer) et 4.2.3 (critiquer) comme deux étapes. Elles ont été livrées
+ensemble. Livrer la proposition seule aurait produit un générateur qui grave `são paulo` comme valeur
+légitime — un artefact que la décision 3 interdit explicitement, et qui risquait d'être utilisé entre
+les deux commits. Une étape intermédiaire connue pour être fausse n'est pas une étape.
+
+### Ce qu'il faudra surveiller
+
+`not_null` est proposé sur toute colonne sans valeur manquante observée. C'est un **saut** : l'absence
+de nul observé ne prouve pas qu'il ne peut pas y en avoir. Il est assumé — c'est une *proposition*, et
+c'est elle qui attrapera l'irruption de nulls du J60 dès le premier jour au lieu d'attendre que la
+statistique s'en émeuve. Mais si la validation humaine devenait un tampon, cette clause serait la
+première à produire des faux positifs.
+
 ## Question ouverte — l'amendement du registre (soulevée le 2026-08-03)
 
 Le registre `datasets/<dataset>.yaml` déclare les tables à surveiller. Il peut donc, lui aussi,

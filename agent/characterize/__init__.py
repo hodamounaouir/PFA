@@ -14,6 +14,7 @@ ce qui est indispensable puisque c'est *lui* qui décide quelles requêtes
 coûteuses valent la peine d'être posées.
 """
 
+from agent.characterize.collisions import grouper_collisions, normaliser
 from agent.characterize.roles import (
     CATEGORIEL,
     CLE_ETRANGERE,
@@ -44,6 +45,8 @@ __all__ = [
     "TEXTE_LIBRE",
     "classer",
     "classer_fiche",
+    "grouper_collisions",
     "lisible_comme_date",
     "lisible_comme_nombre",
+    "normaliser",
 ]
