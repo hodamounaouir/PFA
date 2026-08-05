@@ -7,106 +7,65 @@ dispersion (`robust_stats`). `profile_table` les demande dans le bon ordre et
 les range dans une seule fiche — celle que `detect` lira, et que `OPS._PROFILES`
 archivera.
 
-## Le critère provisoire, et pourquoi il vit ici
+## Qui décide ce qu'on mesure
 
 Chaque mesure de colonne coûte une requête dédiée ([ADR 010](../../docs/adr/010-agent-generique.md),
 décision 10a) : les demander toutes sur toutes les colonnes multiplierait le
 coût du profilage par le nombre de colonnes, pour un résultat sans intérêt (le
 top-K d'un identifiant) ou impossible (la médiane d'un texte libre). Il faut
-donc **choisir**, et quelqu'un doit porter ce choix.
+donc **choisir**.
 
-Décision (2026-08-04) : c'est `profile_table` qui le porte, pour qu'il soit
-appelable seul — `profile_table("olist", "RAW.ORDERS", "2018-04-29")` et rien
-d'autre. La **caractérisation par rôle** de 4.2 remplacera `_mesure_pour()` par
-un vrai classement (identifiant, clé étrangère, catégoriel, numérique, temporel,
-texte libre) ; c'est cette fonction-là, et elle seule, qui changera.
+Depuis la phase 4.2, ce n'est plus un critère bricolé ici : c'est le **rôle**
+rendu par `agent/characterize/`. L'assembleur ne fait plus que traduire un rôle
+en mesure, et cette traduction tient en un dictionnaire :
 
-## Ce que le critère regarde — et ce qu'il ne regarde pas
-
-Il ne regarde **jamais le nom du type SQL**. Ni `VARCHAR`, ni `NUMBER`, ni
-`TEXT` : ces mots sont du vocabulaire Snowflake, et un tool qui les
-interpréterait ferait entrer un dialecte de base dans une couche qui doit les
-ignorer (ADR 010, décision 2). Il ne lit que des **faits mesurés**, disponibles
-pour n'importe quel backend :
-
-| Ce qu'on observe | Ce qu'on en déduit | Mesure |
+| Rôle | Mesure | Pourquoi |
 |---|---|---|
-| aucune valeur distincte | colonne vide sur ce lot | aucune |
-| min **et** max se lisent comme des nombres | la colonne porte des quantités | `robust_stats` |
-| cardinalité ≤ 50 % des lignes | la colonne se répète, donc elle catégorise | `top_values` |
-| le reste (identifiants, texte libre) | rien d'exploitable à ce stade | aucune |
+| `categorical` | `top_values` | ses valeurs font sens — collisions sémantiques |
+| `numeric` | `robust_stats` | position et dispersion, bornes numériques |
+| `identifier` | aucune | un top-K de clés primaires n'apprend rien |
+| `temporal` | aucune | `min`/`max` du profil **sont** déjà la fraîcheur |
+| `free_text` | aucune | nulls et longueurs seulement — jamais de valeurs (R2) |
+| `unknown` | aucune | la colonne n'a rien montré sur ce lot |
 
-**Le test par les bornes est ce qui sauve Bronze.** Là-bas tout est VARCHAR par
-construction (phase 2.1) : un critère fondé sur le type déclaré n'y trouverait
-*aucune* colonne numérique — donc aucune statistique sur la couche où les
-anomalies sont précisément injectées. Les bornes, elles, disent la vérité :
-`min="0.00"`, `max="99.99"` est une colonne de montants, quel que soit son type.
+Le classement se fait sur les agrégats que `profile` vient de rendre : décider
+ne coûte **aucune requête**, ce qui est indispensable puisque c'est la décision
+qui engage les requêtes coûteuses.
 
-## Les deux imprécisions assumées
+## Ce que 4.2 a corrigé, et ce qui reste
 
-1. **Un code postal est « lisible comme un nombre ».** Il recevra donc une
-   médiane, qui ne veut rien dire. Le critère confond « écrit comme un nombre »
-   et « est une quantité » — c'est exactement la distinction *identifiant* vs
-   *numérique* que le classement par rôle de 4.2 tranchera.
-2. **Une colonne de dates peu variée peut recevoir un top-K.** Sans intérêt,
-   sans danger ; 4.2 lui donnera le rôle *temporel* et la fraîcheur (4.1.4).
+Le critère provisoire de 4.1.5 lisait les bornes et la cardinalité, sans rôles.
+Il se trompait sur deux cas, tous deux consignés à l'époque :
 
-Le seuil de cardinalité penche volontairement **du côté généreux** : rater une
-colonne catégorielle, c'est rater une détection ; en mesurer une de trop, c'est
-une requête, et `coverage` le dit tout de suite.
+- **une colonne de dates peu variée recevait un top-K** — corrigé : elle est
+  désormais `temporal` et ne reçoit plus rien ;
+- **un code non unique lisible comme un nombre recevait une médiane** — *pas*
+  corrigé, et ce n'est pas un oubli : rien dans les faits mesurés ne distingue
+  un préfixe de code postal d'un montant. C'est une question de sens, et c'est
+  la validation humaine du contrat (4.2.5) qui la tranchera.
 """
 
-import re
 from typing import Optional
 
 from langchain_core.tools import tool
 
+from agent.characterize import CATEGORIEL, NUMERIQUE, classer
 from agent.tools._connecteur import connecteur_pour
 from agent.tools.top_values import TOP_K_DEFAUT
 
-# Au-delà, la colonne ne catégorise plus : elle identifie (cardinalité ≈ lignes)
-# ou elle raconte (texte libre). Réglage de détection — il rejoindra
-# `agent/config.py` en 4.3, et le vrai critère viendra de 4.2.
-RATIO_CARDINALITE_MAX = 0.5
-
-# Un nombre écrit. Volontairement plus strict que `float()`, qui accepte `nan`,
-# `inf` et `1_000` : une ville nommée « nan » passerait pour une quantité.
-NOMBRE_ECRIT = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$")
+# Rôle -> mesure de colonne. Les rôles absents n'en reçoivent aucune, et c'est
+# une décision : voir le tableau du docstring.
+MESURE_PAR_ROLE = {
+    CATEGORIEL: "top_values",
+    NUMERIQUE: "robust_stats",
+}
 
 
-def _lisible_comme_nombre(valeur) -> bool:
-    """La valeur est-elle un nombre, ou l'écriture d'un nombre ?
-
-    Les deux cas comptent : en Silver une borne arrive déjà typée, en Bronze
-    elle arrive en texte. C'est le seul endroit où la différence est absorbée.
-    """
-    if valeur is None or isinstance(valeur, bool):
-        return False
-    if isinstance(valeur, (int, float)):
-        return True
-    return bool(NOMBRE_ECRIT.match(str(valeur).strip()))
-
-
-def _mesure_pour(stats: dict, row_count: int) -> Optional[str]:
-    """`"robust_stats"`, `"top_values"`, ou rien — le critère provisoire de 4.1.
-
-    **C'est cette fonction que la phase 4.2 remplace**, et elle seule : tout le
-    reste de l'assembleur est indifférent à la façon dont le choix est fait.
-    """
-    if not row_count or not stats.get("distinct"):
-        # Table vide, ou colonne entièrement nulle sur ce lot : il n'y a rien à
-        # regarder, et `profile` a déjà dit qu'il n'y avait rien.
-        return None
-
-    if _lisible_comme_nombre(stats.get("min")) and _lisible_comme_nombre(
-        stats.get("max")
-    ):
-        return "robust_stats"
-
-    if stats["distinct"] / row_count <= RATIO_CARDINALITE_MAX:
-        return "top_values"
-
-    return None
+# Deux étapes séparées volontairement : `classer()` dit **ce que la colonne
+# est** — une propriété de la donnée, que le contrat (4.2) et `detect` (4.3)
+# reliront — et `MESURE_PAR_ROLE` dit **ce qu'on lui demande**, une décision de
+# profilage. Les confondre ferait qu'ajouter une mesure obligerait à toucher au
+# classement.
 
 
 def _assembler(connecteur, table: str, batch_column, batch_id) -> Optional[dict]:
@@ -128,7 +87,14 @@ def _assembler(connecteur, table: str, batch_column, batch_id) -> Optional[dict]
         stats["type"] = colonne.get("type")
         stats["position"] = colonne.get("position")
 
-        voulue = _mesure_pour(stats, lignes)
+        # Le rôle est **rangé dans la fiche**, pas seulement consommé : c'est
+        # lui que la proposition de contrat (4.2) et `detect` (4.3) reliront
+        # pour savoir quels contrôles ont un sens sur cette colonne. Le
+        # recalculer ailleurs, c'est risquer de le recalculer autrement.
+        role = classer(stats, lignes)
+        stats["role"] = role
+
+        voulue = MESURE_PAR_ROLE.get(role)
         obtenue = None
 
         if voulue == "top_values":

@@ -598,6 +598,68 @@ apparaîtra.
 les autres tools. Passer par `top_values.invoke()` aurait rouvert une connexion Snowflake par colonne
 — une à deux secondes chacune. Un test l'impose.
 
+## Décision 12 — Le rôle se déduit des faits, et son ordre de test est la décision (2026-08-04)
+
+### Contexte
+
+La décision 3 fait du contrat le 3ᵉ pilier de détection, et le contrat ne peut se construire que sur
+des **rôles** : « unicité » n'a de sens que sur un identifiant, « collisions sémantiques » que sur une
+colonne catégorielle, « fraîcheur » que sur une colonne temporelle. `agent/characterize/` (4.2.1) est
+ce classement, et c'est le moteur de généricité annoncé depuis le début.
+
+### Décision 12a — même principe qu'en 11, poussé à six rôles
+
+Le classement ne lit **aucun nom de type SQL**, seulement cinq faits que `profile` rend déjà : nombre
+de lignes, cardinalité, nulls, `min`, `max`. L'argument de la décision 11 vaut ici *a fortiori* — en
+Bronze tout est VARCHAR, et un classement fondé sur `DATA_TYPE` y verrait six colonnes de texte libre
+et rien d'autre. Aucun contrôle, sur la couche où les anomalies sont injectées.
+
+Effet secondaire qui compte : **classer ne coûte aucune requête**. C'est indispensable, puisque c'est
+le classement qui décide *quelles* requêtes coûteuses valent la peine d'être posées.
+
+### Décision 12b — l'ordre des tests est la décision, pas un détail d'implémentation
+
+Une colonne satisfait souvent plusieurs signatures. `order_purchase_timestamp` est unique à 99 % et
+sans nul : il satisfait exactement la définition d'un identifiant. Le classer ainsi ferait perdre la
+fraîcheur, les dates futures, les trous et la monotonie — pour ne gagner qu'un contrôle d'unicité sur
+une colonne qui n'identifie rien.
+
+La règle retenue : **le rôle le plus exigeant gagne**, celui qui déclenche les contrôles les plus
+précis. D'où l'ordre `temporal` → `identifier` → `numeric` → `categorical` → `free_text`, et deux
+tests qui l'imposent nommément. Un troisième couvre la raison technique du premier rang : une date
+compacte (`20180429`) se lit aussi comme un nombre.
+
+### Décision 12c — une clé presque unique reste un identifiant
+
+`RATIO_UNICITE_MIN` vaut 0,99 et non 1,0. Ce n'est pas une tolérance de confort : à 1,0, une clé
+primaire portant trois doublons cesserait d'être un identifiant, deviendrait du texte libre, et
+**perdrait son contrôle d'unicité** — au moment précis où elle le viole. L'agent expliquerait
+l'anomalie au lieu de la signaler.
+
+Même raisonnement pour l'exigence `null_count == 0` : elle est requise en *plus* de l'unicité, faute
+de quoi une colonne de montants d'un petit lot passerait pour une clé primaire.
+
+### Ce qui reste hors de portée, et pourquoi c'est écrit plutôt que bricolé
+
+**La clé étrangère n'est pas un fait de colonne.** « Valeurs ⊂ identifiants d'une autre table » exige
+de regarder *deux* tables : aucune statistique de la colonne seule ne peut la révéler. Elle est donc
+absente de 4.2.1 et traitée à part (4.2.2), avec la comparaison croisée qu'elle réclame.
+
+**Un code non unique reste indiscernable d'une quantité.** Un préfixe de code postal se lit comme un
+nombre, se répète, et n'est unique nulle part : il sera classé `numeric` et recevra une médiane vide
+de sens. Aucun fait mesuré ne l'en distingue — c'est une question de **sens**, pas de forme.
+
+C'est exactement ce que la validation humaine du contrat existe pour corriger (décision 3) : la
+machine propose du *descriptif*, l'humain rend *normatif*. Ajouter une heuristique de nommage pour
+rattraper ce cas ferait perdre la propriété la plus défendable du module — qu'aucun nom de colonne
+n'y intervienne, ce qu'un test impose.
+
+### Ce que ça corrige, immédiatement
+
+Le critère provisoire de 4.1.5 donnait un top-K aux colonnes de dates peu variées. Elles sont
+désormais `temporal` et ne reçoivent plus rien : leurs `min`/`max` **sont** déjà la fraîcheur. Un
+identifiant numérique, lui, ne reçoit plus de médiane.
+
 ## Question ouverte — l'amendement du registre (soulevée le 2026-08-03)
 
 Le registre `datasets/<dataset>.yaml` déclare les tables à surveiller. Il peut donc, lui aussi,

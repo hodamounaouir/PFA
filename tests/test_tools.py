@@ -361,70 +361,28 @@ def test_robust_stats_est_bien_un_tool():
 
 
 # ---------------------------------------------------------------------------
-# `profile_table` (4.1.5) : le critère provisoire, puis l'assemblage
+# `profile_table` : l'assemblage, et la traduction rôle -> mesure
 # ---------------------------------------------------------------------------
+#
+# Le **classement** lui-même est éprouvé dans `test_characterize.py` : ici on ne
+# vérifie que ce dont l'assembleur est responsable — qu'un rôle donne bien la
+# mesure attendue, et qu'aucune autre n'en déclenche.
 
 
-@pytest.mark.parametrize(
-    "cas,stats,attendu",
-    [
-        # Bronze : tout est VARCHAR, et c'est LE cas qui condamne un critère
-        # fondé sur le type déclaré — il n'y trouverait aucune colonne numérique.
-        (
-            "montant écrit en texte",
-            {"min": "0.00", "max": "99.99", "distinct": 800},
-            "robust_stats",
-        ),
-        ("nombre déjà typé", {"min": 1, "max": 8000, "distinct": 800}, "robust_stats"),
-        ("ville", {"min": "arcoverde", "max": "santos", "distinct": 300}, "top_values"),
-        ("statut", {"min": "approved", "max": "shipped", "distinct": 8}, "top_values"),
-        ("identifiant", {"min": "a1", "max": "zz", "distinct": 1000}, None),
-        ("texte libre", {"min": "ah", "max": "zut", "distinct": 950}, None),
-        ("colonne vide sur ce lot", {"min": None, "max": None, "distinct": 0}, None),
-        # ⚠️ Les deux bornes doivent être numériques, pas seulement une. Une
-        # seule suffirait sur une colonne Bronze salie par un `N/A` ou un
-        # `inconnu` : elle serait déclarée quantitative, et sa médiane porterait
-        # sur les 3 % de valeurs castables. Ces deux cas ont été ajoutés après
-        # qu'un sabotage (« oublier le `max` ») soit passé inaperçu.
-        (
-            "montant sali par un marqueur texte en fin d'ordre",
-            {"min": "0.00", "max": "N/A", "distinct": 60},
-            "top_values",
-        ),
-        (
-            "code sali par un marqueur texte en début d'ordre",
-            {"min": "inconnu", "max": "99.99", "distinct": 60},
-            "top_values",
-        ),
-    ],
-)
-def test_le_critere_provisoire(cas, stats, attendu):
-    """Le critère ne lit que des **faits mesurés**, jamais un nom de type SQL.
+def test_seuls_deux_roles_declenchent_une_mesure():
+    """La table du docstring, rendue exécutable.
 
-    `VARCHAR`, `NUMBER`, `TEXT` sont du vocabulaire Snowflake : les interpréter
-    ferait entrer un dialecte de base dans une couche qui doit l'ignorer
-    (ADR 010, décision 2). Bornes et cardinalité, elles, existent partout.
+    `identifier`, `temporal`, `free_text` et `unknown` ne reçoivent rien, et
+    chacun pour sa raison : un top-K de clés primaires n'apprend rien ; les
+    `min`/`max` du profil **sont** déjà la fraîcheur ; du texte libre ne doit
+    jamais rendre ses valeurs (R2) ; une colonne vide n'a rien montré.
     """
-    from agent.tools.profile_table import _mesure_pour
+    from agent.characterize import ROLES
+    from agent.tools.profile_table import MESURE_PAR_ROLE
 
-    assert _mesure_pour(stats, 1000) == attendu, cas
-
-
-def test_une_ville_nommee_nan_n_est_pas_une_quantite():
-    """`float("nan")` et `float("inf")` réussissent — d'où une regex, pas un cast."""
-    from agent.tools.profile_table import _lisible_comme_nombre
-
-    assert not _lisible_comme_nombre("nan")
-    assert not _lisible_comme_nombre("inf")
-    assert not _lisible_comme_nombre("1_000")
-    assert _lisible_comme_nombre("-12.5e3")
-
-
-def test_une_table_vide_ne_declenche_aucune_mesure():
-    """0 ligne : la division par le nombre de lignes n'a pas lieu d'être posée."""
-    from agent.tools.profile_table import _mesure_pour
-
-    assert _mesure_pour({"min": "1", "max": "9", "distinct": 0}, 0) is None
+    assert MESURE_PAR_ROLE == {"categorical": "top_values", "numeric": "robust_stats"}
+    muets = set(ROLES) - set(MESURE_PAR_ROLE)
+    assert muets == {"identifier", "foreign_key", "temporal", "free_text", "unknown"}
 
 
 class ConnecteurComplet:
@@ -439,6 +397,7 @@ class ConnecteurComplet:
         {"name": "CUSTOMER_CITY", "type": "TEXT", "position": 2},
         {"name": "PAYMENT_VALUE", "type": "TEXT", "position": 3},
         {"name": "VIDE", "type": "TEXT", "position": 4},
+        {"name": "PURCHASED_AT", "type": "TEXT", "position": 5},
     ]
     AGREGATS = {
         "ORDER_ID": {
@@ -470,6 +429,15 @@ class ConnecteurComplet:
             "distinct": 0,
             "min": None,
             "max": None,
+        },
+        # Peu variée (12 jours sur 100 lignes) : le critère provisoire de 4.1.5
+        # lui aurait donné un top-K. Le classement par rôle la voit temporelle.
+        "PURCHASED_AT": {
+            "null_count": 0,
+            "null_rate": 0.0,
+            "distinct": 12,
+            "min": "2018-01-02 10:56:33",
+            "max": "2018-04-29 23:12:01",
         },
     }
 
@@ -559,7 +527,46 @@ def test_aucune_mesure_sur_une_colonne_ecartee(complet):
 
     mesurees = {appel[1] for appel in complet.mesures}
     assert mesurees == {"CUSTOMER_CITY", "PAYMENT_VALUE"}
-    assert {c["name"] for c in complet.COLONNES} - mesurees == {"ORDER_ID", "VIDE"}
+    assert {c["name"] for c in complet.COLONNES} - mesurees == {
+        "ORDER_ID",
+        "VIDE",
+        "PURCHASED_AT",
+    }
+
+
+def test_une_colonne_de_dates_ne_recoit_plus_de_top_k(complet):
+    """La régression que 4.2 corrige, prise à l'endroit exact du branchement.
+
+    `PURCHASED_AT` porte 12 valeurs sur 100 lignes : le critère provisoire de
+    4.1.5 y voyait une colonne catégorielle et lui demandait un top-K — une
+    requête pour rien, et une liste de dates dans la fiche. Le classement par
+    rôle la voit temporelle, et ses `min`/`max` **sont** déjà la fraîcheur.
+    """
+    fiche = profile_table.invoke({"dataset": "jouet", "table": "RH.EMPLOYES"})
+
+    date = fiche["columns"]["PURCHASED_AT"]
+    assert date["role"] == "temporal"
+    assert date["measure"] is None
+    assert "PURCHASED_AT" not in {appel[1] for appel in complet.mesures}
+
+
+def test_le_role_est_range_dans_la_fiche(complet):
+    """Le rôle n'est pas seulement consommé, il est **conservé**.
+
+    C'est lui que la proposition de contrat (4.2) et `detect` (4.3) reliront
+    pour savoir quels contrôles ont un sens. Le recalculer ailleurs, c'est
+    risquer de le recalculer autrement.
+    """
+    colonnes = profile_table.invoke({"dataset": "jouet", "table": "RH.EMPLOYES"})[
+        "columns"
+    ]
+    assert {nom: c["role"] for nom, c in colonnes.items()} == {
+        "ORDER_ID": "identifier",
+        "CUSTOMER_CITY": "categorical",
+        "PAYMENT_VALUE": "numeric",
+        "VIDE": "unknown",
+        "PURCHASED_AT": "temporal",
+    }
 
 
 def test_le_lot_est_transmis_a_chaque_mesure_de_colonne(complet):
