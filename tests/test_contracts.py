@@ -1,11 +1,13 @@
-"""Contrôle de la proposition de contrat (phase 4.2.2).
+"""Contrôle des contrats (phases 4.2.2 et 4.2.4) : proposer, écrire, relire.
 
 Le contrat est le 3ᵉ pilier de détection, et il a un défaut de naissance connu :
 un générateur naïf **grave ce qu'il observe**. Sur `customer_city`, il écrirait
 `accepted_values: [sao paulo, são paulo]` et légitimerait l'anomalie que tout le
 projet existe pour attraper.
 
-La moitié de ce fichier éprouve donc ce que la proposition **refuse** de dire.
+Une bonne moitié de ce fichier éprouve donc ce que le système **refuse** de
+faire : proposer une clause sans preuve, et appliquer un contrat que personne
+n'a signé.
 """
 
 import pytest
@@ -18,6 +20,10 @@ from agent.contracts import (
     NOMBRES_ILLISIBLES,
     PREUVE_PARTIELLE,
     PROPOSE,
+    ContratInvalide,
+    charger,
+    ecrire,
+    lister,
     proposer,
 )
 
@@ -375,3 +381,186 @@ def test_les_grappes_sont_triees_et_deterministes():
         },
     ]
     assert grouper_collisions(list(reversed(valeurs))) == grappes
+
+
+# ---------------------------------------------------------------------------
+# Les contrats sur disque (4.2.4) : écrire, relire, versionner
+# ---------------------------------------------------------------------------
+
+
+def approuve(contrat: dict) -> dict:
+    """Ce que fera la validation humaine de 4.2.5, en une ligne."""
+    return {**contrat, "status": "approved"}
+
+
+def contrat_simple(table="RAW.ORDERS", version=1, status="proposed"):
+    return {
+        "table": table,
+        "version": version,
+        "status": status,
+        "source": {"batch_id": "2018-04-29", "row_count": 1000},
+        "columns": {"ORDER_ID": {"role": "identifier", "unique": True}},
+        "warnings": [],
+    }
+
+
+def test_un_contrat_ecrit_se_relit_a_l_identique(tmp_path):
+    ecrire(approuve(contrat_simple()), "olist", dossier=tmp_path)
+    assert charger("olist", "RAW.ORDERS", dossier=tmp_path) == approuve(
+        contrat_simple()
+    )
+
+
+def test_un_contrat_propose_n_est_jamais_charge(tmp_path):
+    """LE garde-fou de la phase 4.2, du même rang que R3.
+
+    Un contrat proposé décrit ce que la machine a *observé* ; il n'a aucune
+    autorité. Si `detect` pouvait l'appliquer, la validation humaine deviendrait
+    décorative — le système se donnerait à lui-même la permission qu'il est
+    censé demander.
+    """
+    ecrire(contrat_simple(), "olist", dossier=tmp_path)
+    assert charger("olist", "RAW.ORDERS", dossier=tmp_path) is None
+
+
+def test_un_contrat_en_attente_reste_visible(tmp_path):
+    """« Aucun contrat » et « un contrat qui attend une signature » sont deux
+    situations différentes. Les confondre serait un état silencieux."""
+    ecrire(contrat_simple(), "olist", dossier=tmp_path)
+
+    (vu,) = lister("olist", dossier=tmp_path)
+    assert (vu["table"], vu["version"], vu["status"]) == ("RAW.ORDERS", 1, "proposed")
+    assert lister("dataset_inexistant", dossier=tmp_path) == []
+
+
+def test_la_derniere_version_validee_gagne(tmp_path):
+    """Les contrats sont versionnés, jamais figés (décision 3) — c'est `Amend`
+    qui produira les versions suivantes en phase 5."""
+    ecrire(approuve(contrat_simple(version=1)), "olist", dossier=tmp_path)
+    ecrire(approuve(contrat_simple(version=2)), "olist", dossier=tmp_path)
+
+    assert charger("olist", "RAW.ORDERS", dossier=tmp_path)["version"] == 2
+
+
+def test_une_version_plus_recente_mais_non_validee_ne_prime_pas(tmp_path):
+    """Une v2 proposée n'annule pas la v1 validée : la surveillance continue de
+    s'appuyer sur ce qui a été signé, pas sur ce qui est en discussion."""
+    ecrire(approuve(contrat_simple(version=1)), "olist", dossier=tmp_path)
+    ecrire(contrat_simple(version=2), "olist", dossier=tmp_path)
+
+    assert charger("olist", "RAW.ORDERS", dossier=tmp_path)["version"] == 1
+
+
+def test_ecraser_une_proposition_est_permis(tmp_path):
+    """Rejouer une découverte sur une table non encore validée est normal."""
+    ecrire(contrat_simple(), "olist", dossier=tmp_path)
+    ecrire(contrat_simple(), "olist", dossier=tmp_path)  # ne doit pas lever
+
+
+def test_ecraser_un_contrat_valide_est_refuse(tmp_path):
+    """Une découverte rejouée par mégarde détruirait le travail d'un humain."""
+    ecrire(approuve(contrat_simple()), "olist", dossier=tmp_path)
+
+    with pytest.raises(ContratInvalide, match="déjà validé"):
+        ecrire(contrat_simple(), "olist", dossier=tmp_path)
+
+
+def test_le_nom_du_fichier_n_est_pas_l_identite(tmp_path):
+    """Un `git mv` malheureux ferait appliquer les clauses d'une table à une
+    autre — silencieusement, et avec des violations partout."""
+    ecrit = ecrire(approuve(contrat_simple()), "olist", dossier=tmp_path)
+    ecrit.rename(ecrit.with_name("RAW.CUSTOMERS.v1.yaml"))
+
+    with pytest.raises(ContratInvalide, match="RAW.CUSTOMERS"):
+        lister("olist", dossier=tmp_path)
+
+
+def test_une_version_renommee_est_refusee(tmp_path):
+    ecrit = ecrire(approuve(contrat_simple()), "olist", dossier=tmp_path)
+    ecrit.rename(ecrit.with_name("RAW.ORDERS.v7.yaml"))
+
+    with pytest.raises(ContratInvalide, match="version"):
+        lister("olist", dossier=tmp_path)
+
+
+def test_un_statut_inconnu_est_refuse(tmp_path):
+    """`validé`, `ok`, `yes` : autant de façons de croire qu'on a signé. La liste
+    est fermée, comme celle des couches Medallion dans le registre."""
+    ecrire(contrat_simple(status="proposed"), "olist", dossier=tmp_path)
+    fichier = tmp_path / "olist" / "RAW.ORDERS.v1.yaml"
+    fichier.write_text(
+        fichier.read_text(encoding="utf-8").replace("proposed", "presque"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ContratInvalide, match="status"):
+        lister("olist", dossier=tmp_path)
+
+
+def test_un_yaml_illisible_echoue_au_chargement(tmp_path):
+    """Pas trois nœuds plus loin par un `KeyError` sur `columns`."""
+    (tmp_path / "olist").mkdir(parents=True)
+    (tmp_path / "olist" / "RAW.ORDERS.v1.yaml").write_text(
+        "table: [non fermé\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ContratInvalide, match="illisible"):
+        lister("olist", dossier=tmp_path)
+
+
+def test_les_accents_survivent_a_l_ecriture(tmp_path):
+    """⚠️ Sans `allow_unicode`, `são paulo` s'écrit `s\\xE3o paulo` dans le
+    fichier.
+
+    Le contrat deviendrait illisible **précisément** sur le cas que le projet
+    existe pour montrer — et un humain ne peut pas valider ce qu'il ne peut pas
+    lire. On relit le fichier brut, pas l'objet rechargé : c'est ce que
+    l'humain verra.
+    """
+    contrat = contrat_simple()
+    contrat["warnings"] = [
+        {"column": "CUSTOMER_CITY", "kind": "semantic_collision", "detail": "são paulo"}
+    ]
+    ecrit = ecrire(contrat, "olist", dossier=tmp_path)
+
+    texte = ecrit.read_text(encoding="utf-8")
+    assert "são paulo" in texte
+    assert "\\xE3" not in texte and "\\u00e3" not in texte
+
+
+def test_l_ordre_du_fichier_suit_le_raisonnement(tmp_path):
+    """La table, son statut, d'où elle vient, ses colonnes, puis ce qui cloche.
+
+    Un tri alphabétique mettrait `columns` avant `status` et `warnings` en
+    dernier par hasard plutôt que par intention — or c'est un fichier qu'un
+    humain doit lire pour décider.
+    """
+    ecrit = ecrire(contrat_simple(), "olist", dossier=tmp_path)
+    lignes = [
+        ligne.split(":")[0]
+        for ligne in ecrit.read_text(encoding="utf-8").splitlines()
+        if ligne and not ligne.startswith((" ", "-"))
+    ]
+    assert lignes == ["table", "version", "status", "source", "columns", "warnings"]
+
+
+def test_le_cycle_complet_depuis_un_profil(tmp_path):
+    """De bout en bout : profil -> proposition -> disque -> validation -> relu.
+
+    C'est le chemin que `scripts/discover.py` empruntera en 4.2.5.
+    """
+    villes = categorielle(["sao paulo", "são paulo"])
+    propose = proposer(fiche({"CUSTOMER_CITY": villes}, table="RAW.CUSTOMERS"))
+
+    ecrire(propose, "olist", dossier=tmp_path)
+    assert charger("olist", "RAW.CUSTOMERS", dossier=tmp_path) is None, (
+        "rien n'est signé"
+    )
+
+    valide = approuve(propose)
+    ecrire(valide, "olist", dossier=tmp_path)
+    relu = charger("olist", "RAW.CUSTOMERS", dossier=tmp_path)
+
+    assert relu["columns"]["CUSTOMER_CITY"]["no_semantic_collisions"] is True
+    assert "accepted_values" not in relu["columns"]["CUSTOMER_CITY"]
+    assert relu["warnings"][0]["kind"] == COLLISION

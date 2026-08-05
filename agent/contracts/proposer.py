@@ -73,6 +73,9 @@ VERSION_INITIALE = 1
 
 # Tant qu'un humain n'a pas tranché, aucune clause n'est normative.
 PROPOSE = "proposed"
+# Ce que l'humain a validé — le seul état qu'un run de surveillance applique.
+APPROUVE = "approved"
+STATUTS = (PROPOSE, APPROUVE)
 
 # Les motifs d'avertissement. Nommés plutôt que rédigés : ils seront comptés,
 # filtrés et affichés (phase 6), et une phrase libre ne se compte pas.
