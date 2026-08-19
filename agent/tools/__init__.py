@@ -15,6 +15,7 @@ connecteur — il le résout lui-même depuis le registre. C'est aussi la forme 
 Airflow aura besoin en 4.5 : `(dataset, layer, table, batch_id)`, quatre chaînes.
 """
 
+from agent.tools.generate_dq_rule import generate_dq_rule
 from agent.tools.profile_table import profile_table
 from agent.tools.read_past_incidents import read_past_incidents
 from agent.tools.read_schema_history import read_schema_history
@@ -23,6 +24,7 @@ from agent.tools.top_values import top_values
 from agent.tools.write_log import write_log
 
 __all__ = [
+    "generate_dq_rule",
     "profile_table",
     "read_past_incidents",
     "read_schema_history",

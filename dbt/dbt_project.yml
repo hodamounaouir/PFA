@@ -7,6 +7,10 @@ profile: pfa
 
 model-paths: ["models"]
 macro-paths: ["macros"]
+# Les tests génériques maison (phase 4.1.8). `no_semantic_collisions` y vit :
+# c'est la seule règle du projet qu'aucun test dbt standard ne sait exprimer,
+# et la SEULE façon de la générer sans faire entrer du SQL dans `agent/`.
+test-paths: ["tests"]
 target-path: "target"
 clean-targets:
   - "target"
