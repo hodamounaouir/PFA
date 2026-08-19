@@ -44,6 +44,39 @@ RACINE = Path(__file__).resolve().parent.parent.parent
 
 OPS_SCHEMA = "OPS"
 SCHEMA_HISTORY = "_SCHEMA_HISTORY"
+PROFILES = "_PROFILES"
+
+# Ce qui est conservé d'un profil, et ce qui ne l'est pas (phase 4.3).
+#
+# `_PROFILES` sert **une seule chose** : comparer une mesure du jour aux mêmes
+# mesures des jours précédents. Elle ne stocke donc que du **numérique**, en
+# format long — une ligne par (table, lot, colonne, métrique). Trois raisons :
+#
+# 1. la requête de comparaison devient un `GROUP BY` avec `MEDIAN()`, donc elle
+#    reste dans le connecteur au lieu de remonter en Python ;
+# 2. ajouter une métrique ne demande aucun DDL — ce qui compte, puisque 4.1.3 en
+#    a déjà produit une non prévue au plan (`numeric_rate`) ;
+# 3. le format ne connaît aucun nom de colonne ni de métrique : il vaut pour
+#    n'importe quel dataset, comme le reste du socle.
+#
+# Ce qui est **délibérément absent** : `top` (une liste, pas une mesure), `role`,
+# `type`, et `min`/`max` **lexicographiques** — ces derniers parce qu'ils ne
+# répondent pas à la même question que `numeric_min`/`numeric_max` (piège de
+# 4.1.5), et les comparer d'un jour à l'autre sur Bronze n'aurait pas de sens.
+# La dérive de schéma se lit dans `_SCHEMA_HISTORY`, les valeurs du jour dans le
+# profil du jour : chaque question a déjà son lieu, on n'en duplique aucune ici.
+METRIQUES_TABLE = ("row_count",)
+METRIQUES_COLONNE = (
+    "null_count",
+    "null_rate",
+    "distinct",
+    "coverage",
+    "median",
+    "mad",
+    "numeric_rate",
+    "numeric_min",
+    "numeric_max",
+)
 
 
 class MemoireOps:
@@ -106,6 +139,154 @@ class MemoireOps:
             {"name": nom.upper(), "position": int(position), "batch_id": lot}
             for nom, position, lot in curseur.fetchall()
         ]
+
+    # -- Les profils : la série temporelle des mesures ----------------------
+
+    def _creer_profiles(self, curseur) -> None:
+        """Crée `OPS._PROFILES` si besoin. Même convention qu'`ingestion/load.py`
+        pour `_SCHEMA_HISTORY` : c'est l'écrivain qui la pose, paresseusement.
+
+        Conséquence voulue : rejouer l'infrastructure sur un second trial ne
+        demande **aucune** étape de plus — la table réapparaît au premier profil
+        écrit. C'est le plan B de l'ADR 001 appliqué à la mémoire de l'agent.
+        """
+        curseur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.base}.{OPS_SCHEMA}.{PROFILES} (
+                dataset      VARCHAR,
+                table_name   VARCHAR,
+                batch_id     VARCHAR,
+                column_name  VARCHAR,
+                metric       VARCHAR,
+                value        FLOAT,
+                captured_at  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+            )
+            """
+        )
+
+    def ecrire_profil(
+        self, dataset: str, table: str, batch_id: str, profil: dict
+    ) -> int:
+        """Range un profil dans l'historique. Rend le nombre de mesures écrites.
+
+        ⚠️ `batch_id` est **le lot du run**, pas celui qui a servi à filtrer le
+        profilage — et la nuance décide si l'historique existe. Un mart Gold n'a
+        pas de colonne de lot : `profil["batch_id"]` y vaut toujours `None`, si
+        bien qu'en prenant cette valeur pour clé, chaque run écraserait le
+        précédent et **Gold n'accumulerait jamais d'historique**. La couche où
+        les chiffres faux se voient serait la seule sans dérive statistique.
+
+        Ce que la clé désigne, c'est *quand la mesure a été prise* — et c'est
+        bien ce qui fait une série temporelle. Que le profil couvre un jour
+        (Bronze) ou toute la table (Gold) est une propriété de la mesure, pas de
+        sa date.
+
+        **Idempotent** : réécrire le même lot remplace ses mesures au lieu de les
+        empiler (`DELETE` puis `INSERT`, comme l'ingestion en 2.1). Airflow
+        rejoue une tâche en cas d'échec ; sans ça, un lot rejoué compterait deux
+        fois dans sa propre médiane et l'attirerait vers sa propre valeur.
+
+        `column_name` vaut `NULL` pour une métrique **de table** (`row_count`) :
+        c'est ce qui garde une table unique sans inventer un nom de colonne
+        fictif, qui entrerait en collision le jour où une vraie colonne le
+        porterait.
+        """
+        mesures = [
+            (dataset, table, batch_id, None, nom, float(profil[nom]))
+            for nom in METRIQUES_TABLE
+            if _est_un_nombre(profil.get(nom))
+        ]
+        for colonne, stats in profil.get("columns", {}).items():
+            mesures += [
+                (dataset, table, batch_id, colonne, nom, float(stats[nom]))
+                for nom in METRIQUES_COLONNE
+                if _est_un_nombre(stats.get(nom))
+            ]
+
+        curseur = self._curseur()
+        self._creer_profiles(curseur)
+        curseur.execute(
+            f"DELETE FROM {self.base}.{OPS_SCHEMA}.{PROFILES} "
+            f"WHERE dataset = %s AND table_name = %s AND batch_id = %s",
+            (dataset, table, batch_id),
+        )
+        if mesures:
+            curseur.executemany(
+                f"INSERT INTO {self.base}.{OPS_SCHEMA}.{PROFILES} "
+                f"(dataset, table_name, batch_id, column_name, metric, value) "
+                f"VALUES (%s, %s, %s, %s, %s, %s)",
+                mesures,
+            )
+        return len(mesures)
+
+    def lire_historique(
+        self,
+        dataset: str,
+        table: str,
+        avant: Optional[str] = None,
+        jours: Optional[int] = None,
+    ) -> dict:
+        """Les mesures des lots **précédents**, prêtes à servir de référence.
+
+        Rend `{(colonne, métrique): [valeurs, du plus ancien au plus récent]}`,
+        où `colonne` vaut `None` pour une métrique de table.
+
+        ⭐ **Le lot `avant` est exclu par le SQL, pas par l'ordre des appels.**
+        Le plan disait « lire l'historique avant d'y écrire le profil du jour » ;
+        l'ordre suffit au premier passage et **casse au rejeu** — si le lot a
+        déjà été profilé hier, le relire aujourd'hui le ferait entrer dans sa
+        propre référence et sa médiane se rapprocherait de lui, jusqu'à ce que
+        l'anomalie devienne la norme. Une garantie portée par la requête tient
+        quel que soit l'appelant, y compris celui auquel on n'a pas pensé.
+
+        `jours` borne la fenêtre aux N lots les plus récents — des **lots**, pas
+        des jours calendaires : un jour sans livraison ne doit pas consommer une
+        place dans la référence, sinon une interruption du pipeline raccourcirait
+        l'historique en silence.
+
+        `batch_id` est un VARCHAR ISO, donc son ordre lexicographique **est**
+        l'ordre chronologique : la même propriété que `lire_schema()` exploite.
+        """
+        curseur = self._curseur()
+        self._creer_profiles(curseur)
+
+        table_sql = f"{self.base}.{OPS_SCHEMA}.{PROFILES}"
+        filtre, parametres = "", [dataset, table]
+        if avant is not None:
+            filtre = " AND batch_id < %s"
+            parametres.append(avant)
+
+        limite = ""
+        if jours:
+            limite = (
+                f" AND batch_id IN (SELECT batch_id FROM ("
+                f"SELECT DISTINCT batch_id FROM {table_sql} "
+                f"WHERE dataset = %s AND table_name = %s{filtre} "
+                f"ORDER BY batch_id DESC LIMIT {int(jours)}))"
+            )
+            parametres += [dataset, table] + ([avant] if avant is not None else [])
+
+        curseur.execute(
+            f"SELECT column_name, metric, value FROM {table_sql} "
+            f"WHERE dataset = %s AND table_name = %s{filtre}{limite} "
+            f"ORDER BY batch_id",
+            tuple(parametres),
+        )
+
+        series: dict = {}
+        for colonne, metrique, valeur in curseur.fetchall():
+            series.setdefault((colonne, metrique), []).append(float(valeur))
+        return series
+
+
+def _est_un_nombre(valeur) -> bool:
+    """Une mesure numérique exploitable — `bool` exclu explicitement.
+
+    En Python `True` est un `int` : sans ce filtre, un futur champ booléen du
+    profil entrerait dans l'historique en valant 1,0 et se retrouverait comparé
+    par médiane comme une quantité.
+    """
+    return isinstance(valeur, (int, float)) and not isinstance(valeur, bool)
 
 
 def _cle_de_table(table: str) -> str:

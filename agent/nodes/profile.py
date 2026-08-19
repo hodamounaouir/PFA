@@ -1,74 +1,103 @@
-"""Nœud `profile` — résume un batch en agrégats (stub, phase 3.1).
+"""Nœud `profile` — mesure le lot du jour et le range dans l'historique (4.3).
 
-**Aucun nom de table ni de colonne n'apparaît dans ce fichier** : l'agent doit
-fonctionner sur n'importe quel dataset (décision du 2026-07-28). Les colonnes
-viennent toujours de l'extérieur — de l'introspection en phase 4.3, de l'état ici.
+**Aucun nom de table ni de colonne n'apparaît ici** : tout vient du registre et
+de l'état. C'est la condition pour que l'agent tourne sur n'importe quel dataset
+(ADR 010, décision 2).
 
-Ce qui est profilé : **le batch qui arrive**, pas la table entière. Profiler la
-table entière diluerait l'anomalie : 30 % de nulls sur un batch ne pèsent plus
-que 0,3 % noyés dans 92 jours cumulés.
+Ce qui est profilé : **le lot qui arrive**, pas la table entière. Profiler la
+table entière diluerait l'anomalie — 30 % de nulls sur un jour ne pèsent plus
+que 0,3 % noyés dans 92 jours cumulés. C'est l'exact inverse du cycle Découverte
+(4.2.5), qui profile la table entière parce qu'il cherche ce qui est *normal* :
+la dilution est l'ennemie de l'une et la condition de l'autre.
 
-Réel en phase 4.3 : appelle `profile_table` via le connecteur, puis persiste le
-profil du jour dans `OPS._PROFILES` — **après** avoir lu l'historique, jamais
-avant, sinon le jour courant entre dans sa propre référence.
+Le nœud fait trois choses, et l'ordre compte moins qu'il n'y paraît :
 
-Règle intangible : le profil ne contient **que des agrégats**, jamais de lignes
-brutes. C'est ce qui garantit que le LLM (`diagnose`) ne verra jamais une donnée
-réelle — il raisonne sur des chiffres, pas sur des clients.
+  1. **lire l'historique** des lots précédents (`OPS._PROFILES`) ;
+  2. **mesurer** le lot du jour (`profile_table`) ;
+  3. **ranger** cette mesure dans l'historique.
+
+Le plan (§4.3) posait l'ordre comme impératif : lire avant d'écrire, sinon le
+jour courant entre dans sa propre référence. L'ordre est respecté, mais ce n'est
+**pas** lui qui porte la garantie — `lire_historique(avant=batch_id)` exclut le
+lot courant dans le SQL. La nuance vaut d'être dite : l'ordre suffit au premier
+passage et casse au rejeu, puisqu'un lot déjà profilé hier serait relu
+aujourd'hui comme s'il était du passé. Airflow rejoue une tâche en cas d'échec,
+donc ce cas n'est pas théorique.
+
+Règle intangible, inchangée depuis la phase 3 : le profil ne contient **que des
+agrégats**, jamais de lignes brutes (R2). C'est ce qui garantit que `diagnose`
+ne verra jamais une donnée réelle — il raisonne sur des chiffres, pas sur des
+clients.
 """
 
+from agent import config
+from agent.connectors import ops
 from agent.state import AgentState, log_entry
-
-# Colonnes utilisées quand l'appelant n'en fournit aucune. Les noms sont
-# volontairement neutres : ils ne doivent évoquer aucun dataset particulier.
-STUB_COLUMNS = ("col_1", "col_2", "col_3", "col_4")
-
-STUB_ROW_COUNT = 351
-
-
-def _colonnes(state: AgentState) -> list[str]:
-    """D'où viennent les colonnes à profiler.
-
-    Phase 4.3 : de l'introspection (`INFORMATION_SCHEMA`) via le connecteur.
-    Ici : de `schema_history`, que l'appelant remplit. Dans les deux cas la
-    liste vient de l'extérieur, jamais d'un littéral écrit dans ce fichier.
-    """
-    colonnes = [c["name"] for c in state["schema_history"] if "name" in c]
-    return colonnes or list(STUB_COLUMNS)
-
-
-def _stats(position: int, row_count: int) -> dict:
-    """Statistiques bidon, calculées sur la *position* et non sur le nom.
-
-    Sur la position : c'est ce qui garantit que le stub se comporte pareil quel
-    que soit le dataset branché.
-    """
-    return {
-        # une colonne sur quatre porte des nulls, pour que `detect` ait quelque
-        # chose à constater quel que soit le dataset
-        "null_rate": 0.301 if position % 4 == 1 else 0.0,
-        "distinct": max(1, row_count - position * 10),
-    }
+from agent.tools.profile_table import profile_table
 
 
 def profile(state: AgentState) -> dict:
-    colonnes = _colonnes(state)
-    fiche = {
-        "row_count": STUB_ROW_COUNT,
-        "columns": {
-            nom: _stats(position, STUB_ROW_COUNT)
-            for position, nom in enumerate(colonnes)
-        },
-    }
-    return {
-        "profile": fiche,
-        "logs": [
-            log_entry(
-                "profile",
-                "profil calculé (stub)",
-                table=state["table"],
-                lignes=STUB_ROW_COUNT,
-                colonnes=len(colonnes),
-            )
-        ],
-    }
+    dataset, table, lot = state["dataset"], state["table"], state["batch_id"]
+
+    memoire = ops.MemoireOps()
+    try:
+        historique = memoire.lire_historique(
+            dataset, table, avant=lot, jours=config.FENETRE_HISTORIQUE_LOTS
+        )
+
+        fiche = profile_table.invoke(
+            {"dataset": dataset, "table": table, "batch_id": lot}
+        )
+
+        # `None` = la table déclarée n'existe pas. On ne lève **pas** : c'est
+        # une anomalie que la famille *inventaire* de `detect` doit constater,
+        # et un agent qui plante sur une table absente disparaît au moment
+        # précis où il servirait le plus. On range un profil vide et on le dit.
+        if fiche is None:
+            return {
+                "profile": {},
+                "profile_history": historique,
+                "logs": [
+                    log_entry(
+                        "profile",
+                        "table absente — rien à profiler",
+                        table=table,
+                        batch_id=lot,
+                        lots_de_reference=_lots(historique),
+                    )
+                ],
+            }
+
+        ecrites = memoire.ecrire_profil(dataset, table, lot, fiche)
+
+        return {
+            "profile": fiche,
+            "profile_history": historique,
+            "logs": [
+                log_entry(
+                    "profile",
+                    "profil calculé et archivé",
+                    table=table,
+                    batch_id=lot,
+                    lignes=fiche.get("row_count"),
+                    colonnes=len(fiche.get("columns", {})),
+                    mesures_archivees=ecrites,
+                    lots_de_reference=_lots(historique),
+                )
+            ],
+        }
+    finally:
+        # Un run interrompu ne doit pas laisser une session Snowflake derrière
+        # lui : le warehouse se suspend au bout de 60 s, la session non.
+        memoire.close()
+
+
+def _lots(historique: dict) -> int:
+    """Combien de lots la référence contient — la longueur de la plus longue série.
+
+    C'est ce chiffre que `detect` comparera à `HISTORIQUE_MIN_LOTS` pour décider
+    s'il a le droit de comparer. Le journaliser dès `profile` rend lisible, dans
+    `INCIDENTS`, *pourquoi* un run n'a rien détecté statistiquement — « 4 lots de
+    référence » est une explication, « aucune anomalie » n'en est pas une.
+    """
+    return max((len(v) for v in historique.values()), default=0)

@@ -62,6 +62,17 @@ class AgentState(TypedDict):
     # --- Profile : le batch résumé en agrégats ------------------------------
     profile: dict  # volumes, nulls, cardinalités, min/max… jamais de lignes brutes
 
+    # OPS._PROFILES — les mêmes mesures, sur les lots **précédents** (phase 4.3).
+    # Forme : {(colonne, métrique): [valeurs, du plus ancien au plus récent]},
+    # `colonne` valant None pour une métrique de table.
+    #
+    # Chargé par `profile` plutôt que lu par `detect`, pour que **`detect` ne
+    # fasse aucune entrée-sortie** : ses cinq familles doivent être déterministes
+    # et reproductibles au benchmark (phase 8), donc éprouvables sur de simples
+    # dictionnaires, sans base ni réseau. Un détecteur qui ouvre une connexion
+    # est un détecteur qu'on ne peut pas rejouer à l'identique.
+    profile_history: dict
+
     # --- Detect : les écarts constatés (fait mesurable, pas jugement) -------
     anomalies: list
 
@@ -122,6 +133,7 @@ def new_state(dataset: str, layer: str, table: str, batch_id: str) -> AgentState
         contract_version=None,
         schema_history=[],
         profile={},
+        profile_history={},
         anomalies=[],
         past_incidents=[],
         diagnosis=None,

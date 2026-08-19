@@ -15,7 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from agent.connectors.ops import MemoireOps, _cle_de_table
+from agent.connectors.ops import (
+    MemoireOps,
+    _cle_de_table,
+    _est_un_nombre,
+)
 from agent.registry import Registre, TableDeclaree
 from agent.tools import profile_table, read_schema_history, robust_stats, top_values
 from agent.tools._connecteur import TableNonDeclaree
@@ -59,6 +63,9 @@ class CurseurFactice:
     def execute(self, sql, parametres=None):
         self.appels.append((" ".join(sql.split()), parametres))
         self._courant = self.reponses.pop(0) if self.reponses else []
+
+    def executemany(self, sql, sequence):
+        self.appels.append((" ".join(sql.split()), list(sequence)))
 
     def fetchall(self):
         return self._courant
@@ -135,6 +142,206 @@ def test_avec_un_batch_on_ne_prend_pas_le_dernier(monkeypatch):
     memoire.lire_schema("RAW.ORDERS", "2018-04-14")
     assert "MAX(batch_id)" not in curseur.sql
     assert curseur.appels[-1][1] == ("orders", "2018-04-14")
+
+
+# ---------------------------------------------------------------------------
+# OPS._PROFILES : la série temporelle des mesures (phase 4.3)
+# ---------------------------------------------------------------------------
+
+
+PROFIL = {
+    "table": "RAW.ORDERS",
+    "batch_id": None,  # ⚠️ volontairement None : c'est le cas d'un mart Gold
+    "row_count": 351,
+    "columns": {
+        "CUSTOMER_ID": {
+            "null_rate": 0.301,
+            "null_count": 105,
+            "distinct": 240,
+            # Ce qui NE doit PAS entrer dans l'historique :
+            "role": "identifier",
+            "type": "TEXT",
+            "min": "0000a",
+            "max": "fffff",
+            "top": [{"value": "x", "count": 3}],
+            "measure": None,
+        }
+    },
+}
+
+
+def _mesures_inserees(curseur) -> dict:
+    """Les tuples passés à l'INSERT, indexés par (colonne, métrique)."""
+    lot = next(p for sql, p in curseur.appels if sql.startswith("INSERT"))
+    return {(t[3], t[4]): t[5] for t in lot}
+
+
+def test_le_profil_est_ecrit_sous_le_lot_du_RUN(monkeypatch):
+    """⭐ LE test du correctif : la clé est le lot du run, pas celui du profil.
+
+    Un mart Gold n'a pas de colonne de lot, donc `profil["batch_id"]` y vaut
+    toujours `None`. Prendre cette valeur pour clé ferait que chaque run
+    écraserait le précédent — Gold n'accumulerait **jamais** d'historique, et la
+    couche où les chiffres faux se voient serait la seule sans détection
+    statistique. Le bug ne se serait vu qu'en phase 8, sur une colonne vide.
+    """
+    memoire, curseur = brancher(monkeypatch, [])
+    memoire.ecrire_profil("olist", "RAW.ORDERS", "2018-04-29", PROFIL)
+
+    lot = next(p for sql, p in curseur.appels if sql.startswith("INSERT"))
+    assert {t[2] for t in lot} == {"2018-04-29"}, "le lot du run doit servir de clé"
+
+    suppression = next(p for sql, p in curseur.appels if sql.startswith("DELETE"))
+    assert suppression == ("olist", "RAW.ORDERS", "2018-04-29")
+
+
+def test_ecrire_un_profil_est_idempotent(monkeypatch):
+    """DELETE puis INSERT, comme l'ingestion en 2.1.
+
+    Airflow rejoue une tâche en cas d'échec. Sans la suppression, un lot rejoué
+    compterait deux fois dans sa propre médiane et l'attirerait vers sa valeur —
+    l'anomalie deviendrait la norme d'autant plus vite qu'on aurait retenté.
+    """
+    memoire, curseur = brancher(monkeypatch, [])
+    memoire.ecrire_profil("olist", "RAW.ORDERS", "2018-04-29", PROFIL)
+
+    ordres = [sql.split()[0] for sql, _ in curseur.appels]
+    assert ordres.index("DELETE") < ordres.index("INSERT")
+
+
+def test_seul_le_numerique_entre_dans_l_historique(monkeypatch):
+    """`_PROFILES` sert à comparer des mesures : le reste a déjà son lieu.
+
+    `top` est une distribution et non une mesure ; `role` et `type` sont des
+    qualifications ; `min`/`max` sont **lexicographiques** sur Bronze et ne
+    répondent pas à la même question que `numeric_min`/`numeric_max` (piège de
+    4.1.5). Les comparer d'un jour à l'autre n'aurait aucun sens.
+    """
+    memoire, curseur = brancher(monkeypatch, [])
+    memoire.ecrire_profil("olist", "RAW.ORDERS", "2018-04-29", PROFIL)
+
+    mesures = _mesures_inserees(curseur)
+    assert mesures == {
+        (None, "row_count"): 351.0,
+        ("CUSTOMER_ID", "null_rate"): 0.301,
+        ("CUSTOMER_ID", "null_count"): 105.0,
+        ("CUSTOMER_ID", "distinct"): 240.0,
+    }
+
+
+def test_une_metrique_de_table_n_a_pas_de_colonne(monkeypatch):
+    """`row_count` porte `column_name = NULL`.
+
+    Plutôt qu'un nom fictif du genre `(table)`, qui entrerait en collision le
+    jour où une vraie colonne le porterait.
+    """
+    memoire, curseur = brancher(monkeypatch, [])
+    memoire.ecrire_profil("olist", "RAW.ORDERS", "2018-04-29", PROFIL)
+    assert (None, "row_count") in _mesures_inserees(curseur)
+
+
+@pytest.mark.parametrize("valeur", [True, False])
+def test_un_booleen_n_est_pas_une_mesure(valeur):
+    """En Python `True` est un `int` : sans filtre explicite, un futur champ
+    booléen du profil entrerait dans l'historique en valant 1,0 et se ferait
+    comparer par médiane comme une quantité."""
+    assert _est_un_nombre(valeur) is False
+
+
+def test_lire_l_historique_exclut_le_lot_courant(monkeypatch):
+    """⭐ La garantie est dans le SQL, pas dans l'ordre des appels.
+
+    Le plan disait « lire l'historique avant d'y écrire le profil du jour ».
+    L'ordre suffit au premier passage et **casse au rejeu** : un lot déjà
+    profilé hier serait relu aujourd'hui comme s'il appartenait au passé, sa
+    médiane se rapprocherait de lui, et l'anomalie deviendrait la norme.
+    """
+    memoire, curseur = brancher(monkeypatch, [[]])
+    memoire.lire_historique("olist", "RAW.ORDERS", avant="2018-04-29")
+
+    lecture = next(p for sql, p in curseur.appels if sql.startswith("SELECT"))
+    assert "batch_id < %s" in curseur.sql
+    assert "2018-04-29" in lecture
+
+
+def test_sans_lot_courant_tout_l_historique_est_lu(monkeypatch):
+    memoire, curseur = brancher(monkeypatch, [[]])
+    memoire.lire_historique("olist", "RAW.ORDERS")
+    assert "batch_id < %s" not in curseur.sql
+
+
+def test_la_fenetre_borne_le_nombre_de_lots(monkeypatch):
+    """Des **lots**, pas des jours calendaires : un jour sans livraison ne doit
+    pas consommer une place dans la référence, sinon une interruption du
+    pipeline raccourcirait l'historique en silence."""
+    memoire, curseur = brancher(monkeypatch, [[]])
+    memoire.lire_historique("olist", "RAW.ORDERS", avant="2018-04-29", jours=30)
+    assert "LIMIT 30" in curseur.sql
+    assert "DISTINCT batch_id" in curseur.sql
+
+
+def test_l_historique_est_rendu_en_series_ordonnees(monkeypatch):
+    """Une série par (colonne, métrique), du plus ancien au plus récent — c'est
+    la forme que `detect` comparera."""
+    memoire, _ = brancher(
+        monkeypatch,
+        [
+            # 1ʳᵉ réponse : le CREATE TABLE IF NOT EXISTS posé paresseusement
+            # par l'écrivain, qui consomme un tour du curseur factice.
+            [],
+            [
+                ("CUSTOMER_ID", "null_rate", 0.0),
+                (None, "row_count", 300.0),
+                ("CUSTOMER_ID", "null_rate", 0.1),
+                (None, "row_count", 310.0),
+            ],
+        ],
+    )
+    series = memoire.lire_historique("olist", "RAW.ORDERS")
+    assert series == {
+        ("CUSTOMER_ID", "null_rate"): [0.0, 0.1],
+        (None, "row_count"): [300.0, 310.0],
+    }
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        lambda m: m.ecrire_profil("olist", "RAW.ORDERS", "2018-04-29", PROFIL),
+        lambda m: m.lire_historique("olist", "RAW.ORDERS"),
+    ],
+    ids=["écriture", "lecture"],
+)
+def test_la_table_des_profils_est_creee_au_besoin(monkeypatch, action):
+    """La création paresseuse, sur **les deux** chemins.
+
+    Même convention qu'`ingestion/load.py` pour `_SCHEMA_HISTORY` : c'est
+    l'utilisateur de la table qui la pose. Conséquence voulue — rejouer
+    l'infrastructure sur un second trial ne demande aucune étape de plus, la
+    table réapparaît au premier profil. Le plan B de l'ADR 001 appliqué à la
+    mémoire de l'agent.
+
+    Écrit après un sabotage passé inaperçu : retirer l'appel du chemin
+    d'écriture laissait la suite verte, alors qu'un compte neuf aurait échoué au
+    premier run sur un `Table does not exist`.
+    """
+    memoire, curseur = brancher(monkeypatch, [[], []])
+    action(memoire)
+
+    creations = [
+        sql for sql, _ in curseur.appels if sql.startswith("CREATE TABLE IF NOT EXISTS")
+    ]
+    assert creations, "la table n'est jamais créée"
+    assert "_PROFILES" in creations[0]
+
+
+def test_un_profil_vide_n_insere_rien(monkeypatch):
+    """Une table absente ne doit pas faire lever : elle n'a rien à archiver."""
+    memoire, curseur = brancher(monkeypatch, [])
+    assert (
+        memoire.ecrire_profil("olist", "RAW.X", "2018-04-29", {"table": "RAW.X"}) == 0
+    )
+    assert not any(sql.startswith("INSERT") for sql, _ in curseur.appels)
 
 
 # ---------------------------------------------------------------------------

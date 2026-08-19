@@ -1,4 +1,4 @@
-"""Garde-fou de la suite de tests : **aucun test n'appelle un vrai LLM**.
+"""Garde-fous de la suite : **ni vrai LLM, ni vraie base**.
 
 La règle vient du `CONTRIBUTING` — la CI doit être déterministe, gratuite, et
 tourner sans clé API. Jusqu'ici elle reposait sur la discipline : chaque test
@@ -27,6 +27,7 @@ from agent.llm import Diagnostic
 # chercher le module explicitement, sans quoi le `monkeypatch` ne remplacerait
 # rien — silencieusement, en laissant partir de vrais appels réseau.
 diagnose_mod = importlib.import_module("agent.nodes.diagnose")
+profile_mod = importlib.import_module("agent.nodes.profile")
 
 DIAGNOSTIC_FACTICE = Diagnostic(
     root_cause="(diagnostic factice — aucun LLM appelé en test)",
@@ -69,3 +70,146 @@ def aucun_client_groq(monkeypatch):
         )
 
     monkeypatch.setattr("agent.llm._client", refus)
+
+
+# ---------------------------------------------------------------------------
+# Seconde règle, ajoutée en 4.3 : aucun test n'ouvre de connexion Snowflake
+# ---------------------------------------------------------------------------
+#
+# Jusqu'à la phase 4.3, `profile` était un stub sans entrée-sortie et la question
+# ne se posait pas. Le nœud réel lit `OPS._PROFILES`, profile la table et
+# réécrit : brancher le vrai code a fait passer la suite de 16 secondes à
+# 5 minutes, avec 82 échecs — la suite ne testait plus l'agent, elle testait le
+# réseau. Exactement l'incident du LLM en 3.3, à un an d'intervalle et sur une
+# autre couture.
+#
+# La parade est la même, et elle est structurelle : un double par défaut pour
+# que les tests du graphe n'aient rien à câbler, **plus** une barrière qui fait
+# échouer bruyamment toute tentative de connexion réelle.
+
+
+class ProfilFactice:
+    """Ce que `profile_table` rend en test — piloté par les tests, jamais par une base.
+
+    Reproduit le comportement de l'ancien stub, dont les tests du graphe
+    dépendent : des nulls sur les colonnes de position 1, 5, 9… (`position % 4
+    == 1`), pour que `detect` ait quelque chose à constater quel que soit le
+    dataset branché. Ce n'est pas une régression : cette génération était du
+    décor de test depuis le début, elle vivait simplement dans le code de
+    production faute d'endroit où la mettre.
+    """
+
+    COLONNES_PAR_DEFAUT = ("col_1", "col_2", "col_3", "col_4")
+    LIGNES = 351
+
+    def __init__(self):
+        self.reinitialiser()
+
+    def reinitialiser(self) -> None:
+        self.colonnes = list(self.COLONNES_PAR_DEFAUT)
+        self.row_count = self.LIGNES
+        self.absente = False  # simule une table déclarée mais disparue
+        self.appels = []
+
+    def invoke(self, arguments: dict):
+        self.appels.append(arguments)
+        if self.absente:
+            return None
+        return {
+            "table": arguments["table"],
+            "batch_id": arguments.get("batch_id"),
+            "row_count": self.row_count,
+            "columns": {
+                nom: {
+                    "null_rate": 0.301 if position % 4 == 1 else 0.0,
+                    "null_count": int(
+                        self.row_count * (0.301 if position % 4 == 1 else 0.0)
+                    ),
+                    "distinct": max(1, self.row_count - position * 10),
+                    "role": "categorical",
+                    "measure": None,
+                }
+                for position, nom in enumerate(self.colonnes)
+            },
+        }
+
+
+PROFIL_FACTICE = ProfilFactice()
+
+
+class MemoireFactice:
+    """`OPS._PROFILES` en mémoire : écrit, relit, et n'ouvre rien.
+
+    Partagée par toute la suite via l'instance ci-dessous, pour qu'un test
+    puisse constituer un historique de plusieurs lots sans base — c'est ce dont
+    la famille statistique de `detect` aura besoin.
+    """
+
+    def __init__(self):
+        self.reinitialiser()
+
+    def reinitialiser(self) -> None:
+        # {(dataset, table, batch_id): {(colonne, métrique): valeur}}
+        self.lots = {}
+        self.fermee = False
+
+    def ecrire_profil(self, dataset, table, batch_id, profil):
+        mesures = {}
+        if isinstance(profil.get("row_count"), (int, float)):
+            mesures[(None, "row_count")] = float(profil["row_count"])
+        for colonne, stats in profil.get("columns", {}).items():
+            for nom, valeur in stats.items():
+                if isinstance(valeur, (int, float)) and not isinstance(valeur, bool):
+                    mesures[(colonne, nom)] = float(valeur)
+        self.lots[(dataset, table, batch_id)] = mesures
+        return len(mesures)
+
+    def lire_historique(self, dataset, table, avant=None, jours=None):
+        lots = sorted(
+            (lot, m)
+            for (d, t, lot), m in self.lots.items()
+            if d == dataset and t == table and (avant is None or lot < avant)
+        )
+        if jours:
+            lots = lots[-jours:]
+        series = {}
+        for _lot, mesures in lots:
+            for cle, valeur in mesures.items():
+                series.setdefault(cle, []).append(valeur)
+        return series
+
+    def close(self):
+        self.fermee = True
+
+
+MEMOIRE_FACTICE = MemoireFactice()
+
+
+@pytest.fixture(autouse=True)
+def pas_de_vraie_base(monkeypatch):
+    """Le double par défaut : `profile` mesure et archive, sans rien ouvrir."""
+    PROFIL_FACTICE.reinitialiser()
+    MEMOIRE_FACTICE.reinitialiser()
+    monkeypatch.setattr(profile_mod, "profile_table", PROFIL_FACTICE)
+    monkeypatch.setattr(profile_mod.ops, "MemoireOps", lambda *a, **k: MEMOIRE_FACTICE)
+
+
+@pytest.fixture(autouse=True)
+def aucune_connexion_snowflake(monkeypatch):
+    """Seconde barrière, jumelle d'`aucun_client_groq`.
+
+    La fixture précédente neutralise les coutures connues aujourd'hui ; celle-ci
+    couvre celles de demain. Si une connexion apparaît ailleurs — un nœud, un
+    tool, un script — la suite échoue bruyamment au lieu d'attendre le réseau,
+    de consommer des crédits, et de dépendre d'un trial qui expire.
+    """
+
+    def refus(*args, **kwargs):
+        raise AssertionError(
+            "Un test a tenté d'ouvrir une connexion Snowflake. Les tests ne "
+            "touchent jamais une vraie base — utilisez les doubles de "
+            "tests/conftest.py (PROFIL_FACTICE, MEMOIRE_FACTICE) ou un "
+            "connecteur en mémoire."
+        )
+
+    monkeypatch.setattr("agent.connectors.snowflake.ouvrir_connexion", refus)

@@ -65,6 +65,11 @@ from agent.state import (
     new_state,
 )
 
+# Le double de `profile_table` (cf. conftest.py) : depuis 4.3 c'est lui, et non
+# plus l'état, qui décide des colonnes que la mesure rendra. pytest place le
+# dossier des tests sur `sys.path`, d'où l'import direct du conftest.
+from conftest import PROFIL_FACTICE
+
 RACINE = Path(__file__).resolve().parent.parent
 
 # Même piège que dans `test_agent_nodes.py` : `agent.nodes.diagnose` désigne la
@@ -84,6 +89,8 @@ def etat(schema, **surcharges):
         dataset="jouet", layer="bronze", table="UNE.TABLE", batch_id="2018-04-29"
     )
     state["schema_history"] = schema
+    # Depuis 4.3, la forme du lot se pilote là où la mesure a lieu.
+    PROFIL_FACTICE.colonnes = [c["name"] for c in schema]
     state.update(surcharges)
     return state
 
@@ -643,17 +650,40 @@ def test_deux_runs_simultanes_ne_se_melangent_pas():
 # --- 6. LA preuve : la pause survit à la mort du process ---------------------
 
 
+# ⚠️ Ce script tourne dans un **vrai** process : les fixtures `autouse` de
+# conftest.py ne s'y appliquent pas. Depuis 4.3, `profile` lit et écrit
+# `OPS._PROFILES` et profile la table — sans rebranchement, ce lanceur ouvrirait
+# une connexion Snowflake, et ce test porte sur la survie de la pause, pas sur
+# la mesure. On importe les **mêmes** doubles que le reste de la suite plutôt
+# que d'en réécrire ici : deux définitions du même décor finiraient par diverger,
+# et c'est le lanceur — celui qu'on relit le moins — qui mentirait.
 LANCEUR = """
 import sys
+sys.path.insert(0, {tests!r})
+
+import importlib
+
+from conftest import MEMOIRE_FACTICE, PROFIL_FACTICE
+
+# `import agent.nodes.profile` rendrait la **fonction** réexportée, pas le
+# module — le piège déjà documenté dans conftest.py et test_tools.py. Ici il se
+# manifeste par un `AttributeError` franc ; ailleurs il a rendu des monkeypatch
+# silencieusement sans effet. Troisième occurrence : la réexportation coûte.
+profile_mod = importlib.import_module("agent.nodes.profile")
+
+profile_mod.profile_table = PROFIL_FACTICE
+profile_mod.ops.MemoireOps = lambda *a, **k: MEMOIRE_FACTICE
+
 from agent.graph import agent_persistant, thread, proposition_en_attente
 from agent.state import new_state
 
 s = new_state("jouet", "bronze", "UNE.TABLE", "2018-04-29")
-s["schema_history"] = [{{"name": f"c{{i}}"}} for i in range(4)]
 with agent_persistant({db!r}) as app:
     r = app.invoke(s, thread("survivant"))
     sys.exit(0 if proposition_en_attente(r) is not None else 1)
 """
+
+DOSSIER_TESTS = str(Path(__file__).resolve().parent)
 
 
 def test_la_pause_survit_a_la_mort_du_process(tmp_path):
@@ -669,7 +699,7 @@ def test_la_pause_survit_a_la_mort_du_process(tmp_path):
     db = tmp_path / "checkpoints.sqlite"
 
     lancement = subprocess.run(
-        [sys.executable, "-c", LANCEUR.format(db=str(db))],
+        [sys.executable, "-c", LANCEUR.format(db=str(db), tests=DOSSIER_TESTS)],
         cwd=RACINE,
         env={**os.environ, "PYTHONPATH": str(RACINE)},
         capture_output=True,
@@ -709,7 +739,7 @@ def test_le_script_decide_reprend_un_run_lance_ailleurs(tmp_path):
     db = tmp_path / "checkpoints.sqlite"
 
     subprocess.run(
-        [sys.executable, "-c", LANCEUR.format(db=str(db))],
+        [sys.executable, "-c", LANCEUR.format(db=str(db), tests=DOSSIER_TESTS)],
         cwd=RACINE,
         env={**os.environ, "PYTHONPATH": str(RACINE)},
         check=True,
@@ -752,7 +782,7 @@ def test_decide_refuse_une_correction_reecrite_sans_approbation(tmp_path):
     va tourner, alors que ces deux chemins n'écrivent rien dans les données."""
     db = tmp_path / "checkpoints.sqlite"
     subprocess.run(
-        [sys.executable, "-c", LANCEUR.format(db=str(db))],
+        [sys.executable, "-c", LANCEUR.format(db=str(db), tests=DOSSIER_TESTS)],
         cwd=RACINE,
         env={**os.environ, "PYTHONPATH": str(RACINE)},
         check=True,

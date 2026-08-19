@@ -24,6 +24,11 @@ from agent.nodes import amend, apply, detect, diagnose, log, profile, propose, v
 from agent.nodes.amend import _version_suivante
 from agent.nodes.validate import VALIDATION_OK
 from agent.nodes.detect import STUB_NULL_THRESHOLD
+
+# Le double de `profile_table` (cf. conftest.py) : depuis 4.3 c'est lui, et non
+# plus l'état, qui décide des colonnes que la mesure rendra. pytest place le
+# dossier des tests sur `sys.path`, d'où l'import direct du conftest.
+from conftest import MEMOIRE_FACTICE, PROFIL_FACTICE
 from agent.nodes.propose import build_proposal, lire_reponse
 from agent.state import (
     DECISION_AMEND,
@@ -59,6 +64,12 @@ def base_state(schema=None, table="RAW.ORDERS"):
         dataset="olist", layer="bronze", table=table, batch_id="2018-04-29"
     )
     state["schema_history"] = schema or []
+    # Depuis 4.3, `profile` mesure vraiment : ce sont les colonnes que le double
+    # de `profile_table` rendra (cf. tests/conftest.py), et non plus l'état, qui
+    # décident de la fiche. Le test continue de piloter la forme du lot — il le
+    # fait simplement là où la mesure a lieu.
+    if schema:
+        PROFIL_FACTICE.colonnes = [c["name"] for c in schema]
     return state
 
 
@@ -68,8 +79,13 @@ def base_state(schema=None, table="RAW.ORDERS"):
 def test_profile_ne_produit_que_des_agregats():
     """Le profil ne doit jamais contenir de lignes brutes : le LLM les verrait."""
     fiche = profile(base_state(SCHEMA_COMMANDES))["profile"]
-    assert set(fiche) == {"row_count", "columns"}
+    assert set(fiche) == {"table", "batch_id", "row_count", "columns"}
     assert isinstance(fiche["row_count"], int)
+    # Aucune valeur de la fiche n'est une collection de lignes : les seules
+    # listes admises sont les top-K, qui sont une distribution et non un extrait.
+    for stats in fiche["columns"].values():
+        for cle, valeur in stats.items():
+            assert cle == "top" or not isinstance(valeur, (list, tuple)), cle
 
 
 def test_profile_s_adapte_a_n_importe_quel_dataset():
@@ -86,10 +102,19 @@ def test_profile_s_adapte_a_n_importe_quel_dataset():
 
 
 def test_profile_calcule_les_memes_metriques_partout():
-    """Les métriques du stub sont indépendantes du type : valables pour toute colonne."""
-    for schema in (SCHEMA_COMMANDES, SCHEMA_RH):
-        for stats in profile(base_state(schema))["profile"]["columns"].values():
-            assert set(stats) == {"null_rate", "distinct"}
+    """Les métriques sont indépendantes du type : les mêmes pour toute colonne.
+
+    On compare les *jeux de clés* plutôt qu'une liste figée : ce qui doit être
+    vrai, c'est qu'aucune colonne ne reçoive un traitement particulier selon le
+    dataset — pas que le profil porte telle métrique précise, qui dépend de ce
+    que le critère de mesure a décidé.
+    """
+    jeux = {
+        frozenset(stats)
+        for schema in (SCHEMA_COMMANDES, SCHEMA_RH)
+        for stats in profile(base_state(schema))["profile"]["columns"].values()
+    }
+    assert len(jeux) == 1, jeux
 
 
 def test_profile_sans_schema_reste_neutre():
@@ -111,6 +136,98 @@ def test_profile_ecrit_une_ligne_de_journal_au_format_commun():
     assert entry["node"] == "profile"
     assert entry["colonnes"] == 3
     assert set(log_entry("x", "y")) <= set(entry)  # ts + node + message garantis
+
+
+# --- profile : la mesure est rangée dans l'historique (phase 4.3) ------------
+
+
+def test_profile_archive_la_mesure_du_jour():
+    """Mesurer sans archiver ne construirait jamais de référence.
+
+    C'est `_PROFILES` qui rend la famille statistique possible : sans écriture,
+    l'agent recommencerait chaque jour à zéro et ne pourrait comparer qu'au
+    contrat — soit un pilier de détection sur trois.
+    """
+    etat = base_state(SCHEMA_COMMANDES)
+    resultat = profile(etat)
+
+    assert ("olist", "RAW.ORDERS", "2018-04-29") in MEMOIRE_FACTICE.lots
+    assert resultat["logs"][0]["mesures_archivees"] > 0
+
+
+def test_profile_charge_l_historique_dans_l_etat():
+    """`detect` ne fait aucune entrée-sortie : c'est `profile` qui lui apporte
+    la référence. Un détecteur qui ouvre une connexion est un détecteur qu'on ne
+    peut pas rejouer à l'identique au benchmark."""
+    MEMOIRE_FACTICE.lots[("olist", "RAW.ORDERS", "2018-04-01")] = {
+        (None, "row_count"): 300.0
+    }
+    resultat = profile(base_state(SCHEMA_COMMANDES))
+    assert resultat["profile_history"][(None, "row_count")] == [300.0]
+
+
+def test_le_lot_du_jour_n_entre_pas_dans_sa_propre_reference():
+    """⭐ La garantie qui survit au rejeu.
+
+    On archive d'abord le lot courant — comme si un run précédent l'avait déjà
+    fait — puis on relance. S'il ressortait dans l'historique, sa médiane se
+    rapprocherait de lui à chaque tentative, jusqu'à ce que l'anomalie devienne
+    la norme. Airflow rejoue une tâche en cas d'échec : le cas n'est pas
+    théorique.
+    """
+    MEMOIRE_FACTICE.lots[("olist", "RAW.ORDERS", "2018-04-29")] = {
+        (None, "row_count"): 999.0
+    }
+    MEMOIRE_FACTICE.lots[("olist", "RAW.ORDERS", "2018-04-28")] = {
+        (None, "row_count"): 300.0
+    }
+    historique = profile(base_state(SCHEMA_COMMANDES))["profile_history"]
+
+    assert historique[(None, "row_count")] == [300.0], "le lot courant a fuité"
+
+
+def test_une_table_absente_ne_fait_pas_lever():
+    """La table déclarée a disparu : c'est **l'anomalie**, pas un plantage.
+
+    Un agent qui casse quand la donnée manque disparaît au moment précis où on
+    a le plus besoin de lui — c'est la famille *inventaire* de `detect` qui
+    doit la constater. Même symétrie que dans le connecteur (4.0).
+    """
+    PROFIL_FACTICE.absente = True
+    resultat = profile(base_state(SCHEMA_COMMANDES))
+
+    assert resultat["profile"] == {}
+    assert "absente" in resultat["logs"][0]["message"]
+    assert MEMOIRE_FACTICE.lots == {}, "rien à archiver pour une table absente"
+
+
+def test_la_connexion_est_fermee_meme_si_le_profilage_echoue(monkeypatch):
+    """Un run interrompu ne doit pas laisser une session Snowflake ouverte : le
+    warehouse se suspend au bout de 60 s, la session non."""
+
+    class Explose:
+        def invoke(self, arguments):
+            raise RuntimeError("Snowflake indisponible")
+
+    monkeypatch.setattr(
+        importlib.import_module("agent.nodes.profile"), "profile_table", Explose()
+    )
+
+    with pytest.raises(RuntimeError):
+        profile(base_state(SCHEMA_COMMANDES))
+    assert MEMOIRE_FACTICE.fermee
+
+
+def test_profile_journalise_la_taille_de_sa_reference():
+    """« 4 lots de référence » est une explication ; « aucune anomalie » n'en est
+    pas une. C'est ce chiffre qui rendra lisible, dans INCIDENTS, pourquoi un run
+    n'a rien détecté statistiquement."""
+    for jour in ("2018-04-26", "2018-04-27", "2018-04-28"):
+        MEMOIRE_FACTICE.lots[("olist", "RAW.ORDERS", jour)] = {
+            (None, "row_count"): 300.0
+        }
+    entree = profile(base_state(SCHEMA_COMMANDES))["logs"][0]
+    assert entree["lots_de_reference"] == 3
 
 
 # --- Nœud 2/8 : detect -------------------------------------------------------
