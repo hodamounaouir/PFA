@@ -751,17 +751,73 @@ par ce qui ressemblerait à un bug.
 Conséquence non tranchée : **quelle issue de `Propose` pour « le registre a vieilli » ?** Ce n'est ni
 une donnée fausse (`approved`), ni un contrat périmé (`amend_contract`), ni un cas isolé (`rejected`).
 
-Deux options :
+Deux options étaient sur la table :
 
 - **élargir `amend_contract`** — c'est la même idée (« ce que j'ai déclaré est faux, pas la donnée »),
   au prix d'une issue qui recouvre deux fichiers différents ;
 - **ajouter une 4ᵉ issue** — plus explicite, au prix d'un nœud de plus et d'une décision de plus à
   expliquer à l'humain.
 
-À trancher **avant** d'écrire `detect` (4.3), et à consigner ici.
-
 Note de méthode : cette lacune a été trouvée en expliquant le plan, pas en l'écrivant. C'est un
 argument pour continuer à faire relire les phases avant de les commencer.
+
+## Décision 14 — Le registre n'est pas amendable par l'agent (2026-08-17)
+
+**Tranchée par le porteur du projet.** Aucune des deux options n'est retenue : **le graphe ne change
+pas** — 8 nœuds, 3 issues. Un renommage de table se signale toujours, mais il se répond avec les
+issues existantes, parce qu'il recouvre en réalité **deux situations que rien ne permet à la machine
+de distinguer** — et que l'humain, lui, tranche d'un regard.
+
+### Les deux cas
+
+| Ce que l'humain constate | Sa réponse | Ce qui est écrit |
+|---|---|---|
+| **Vrai renommage métier** — la table s'appelle légitimement autrement | `rejected` | rien ; l'humain met `datasets/<dataset>.yaml` à jour lui-même, en git |
+| **Renommage accidentel** — quelqu'un a cassé quelque chose | `approved` | `apply` restaure le nom d'origine en base |
+
+### Pourquoi l'agent n'écrit pas dans le registre
+
+Le contrat et le registre n'ont pas le même statut, et c'est ce qui justifie de les traiter
+différemment. Le **contrat** est *descriptif devenu normatif* : la machine observe, propose, l'humain
+signe — il est donc légitime qu'un nœud le fasse évoluer. Le **registre** est *normatif d'emblée*
+(décision 2) : il déclare **quelles tables méritent d'être surveillées**, c'est-à-dire un périmètre.
+
+Un agent qui réécrit son propre périmètre de surveillance décide de ce qu'il surveille. C'est
+exactement l'autorité que le projet lui refuse — au même titre que l'écriture sans approbation. Et le
+registre fait vingt lignes, vit dans git, se relit en pull request : le tenir à jour à la main n'est
+pas une corvée, c'est une trace.
+
+### ⭐ Ce que le cas 2 apporte gratuitement : P6 tient par construction
+
+Restaurer un nom n'est **pas** inventer une valeur. Le nom d'origine est écrit dans
+`datasets/<dataset>.yaml` — l'agent le *lit*, il ne le devine pas. L'invariant P6 (« ne jamais
+inventer une valeur ») est donc respecté sans garde-fou supplémentaire, et c'est le registre lui-même
+qui joue le rôle de source de vérité. C'est le contraire du cas « 8000 dans une colonne à [1–100] »,
+où aucune source ne dit ce que la valeur aurait dû être.
+
+### Ce que ça coûte, et qu'on assume
+
+1. **`apply` émet du DDL pour la première fois.** Jusqu'ici ses garde-fous étaient pensés pour du
+   DML ligne à ligne : « ne toucher que la table diagnostiquée », « rejeter les mots-clés
+   destructeurs », « ne pas substituer une valeur devinée ». Un `ALTER TABLE … RENAME TO …` n'est
+   attrapé par aucun d'eux, et il porte **deux** noms de table — donc la règle « une seule table »
+   doit être formulée en termes de *l'écart diagnostiqué* (A absente, B nouvelle), pas d'un nom
+   unique. À traiter explicitement en 5.3, avec son propre test : c'est la seule écriture de l'agent
+   qui modifie un schéma plutôt qu'un contenu.
+2. **`rejected` fait taire la signature.** Si l'humain répond `rejected` puis **oublie** de mettre le
+   registre à jour, l'agent se tait sur une table qu'il ne voit plus. Le garde-fou existe déjà et
+   n'est pas à inventer : l'écran « signatures en silence » de la phase 6, réactivable d'un clic.
+   Le risque est borné — dès que le registre est corrigé, la table redevient surveillée.
+3. **`INCIDENTS` ne distingue pas les deux « non ».** Un renommage accepté et une anomalie refusée
+   portent tous deux `rejected`. La famille de l'écart (`inventaire`) reste dans la ligne, donc la
+   requête de la phase 8 sait les séparer — mais elle doit joindre sur la famille, pas sur la seule
+   décision.
+
+### Ce que ça évite
+
+Le graphe reste à 8 nœuds et 3 issues, donc `README.md`, `CAHIER_DES_CHARGES.md`, `ARCHITECTURE.md`,
+`DESIGN.md` et le diagramme n'ont **rien** à changer — la remise en cohérence de la phase 3.0 tient.
+Et `amend` garde un seul métier : *écrit dans le contrat, jamais ailleurs*, ce que son test prouve.
 
 ## Conséquences
 
