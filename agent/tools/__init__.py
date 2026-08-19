@@ -16,8 +16,17 @@ Airflow aura besoin en 4.5 : `(dataset, layer, table, batch_id)`, quatre chaîne
 """
 
 from agent.tools.profile_table import profile_table
+from agent.tools.read_past_incidents import read_past_incidents
 from agent.tools.read_schema_history import read_schema_history
 from agent.tools.robust_stats import robust_stats
 from agent.tools.top_values import top_values
+from agent.tools.write_log import write_log
 
-__all__ = ["profile_table", "read_schema_history", "robust_stats", "top_values"]
+__all__ = [
+    "profile_table",
+    "read_past_incidents",
+    "read_schema_history",
+    "robust_stats",
+    "top_values",
+    "write_log",
+]

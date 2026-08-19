@@ -175,7 +175,29 @@ class MemoireFactice:
     def reinitialiser(self) -> None:
         # {(dataset, table, batch_id): {(colonne, métrique): valeur}}
         self.lots = {}
+        # `OPS.INCIDENTS` : une ligne par run, append-only comme la vraie.
+        self.incidents = []
+        self.ecriture_leve = False  # pour éprouver la panne de journal
         self.fermee = False
+
+    def ecrire_incident(self, incident):
+        if self.ecriture_leve:
+            raise RuntimeError("INCIDENTS indisponible")
+        self.incidents.append(dict(incident))
+        return incident.get("incident_id")
+
+    def lire_incidents(self, dataset, table, limite=200):
+        # Même filtre R5 que le SQL : un incident sans décision humaine n'a rien
+        # tranché, et le lire comme un refus ferait taire l'agent sur une
+        # question que personne n'a lue.
+        retenus = [
+            i
+            for i in self.incidents
+            if i.get("dataset") == dataset
+            and i.get("table_name") == table
+            and i.get("human_decision") is not None
+        ]
+        return list(reversed(retenus))[:limite]
 
     def ecrire_profil(self, dataset, table, batch_id, profil):
         mesures = {}

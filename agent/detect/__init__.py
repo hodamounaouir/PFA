@@ -79,6 +79,7 @@ def ecart(
     colonne: Optional[str] = None,
     observe=None,
     reference=None,
+    ampleur: Optional[float] = None,
     **details,
 ) -> dict:
     """Un écart constaté, dans la forme unique que toutes les familles rendent.
@@ -91,6 +92,17 @@ def ecart(
     `colonne` vaut `None` quand l'écart porte sur la table entière — une table
     absente, un volume qui s'effondre. Le champ existe quand même : un lecteur
     qui devrait deviner sa présence finirait par écrire un `.get()` de trop.
+
+    `ampleur` est **un champ de premier rang et non un détail** (phase 4.4) :
+    c'est le 4ᵉ terme de la signature d'anomalie, celui qui décide si un écart
+    déjà refusé doit rester silencieux ou reparler. Chaque famille nomme sa
+    propre ampleur — un taux, un décompte, un score — parce qu'elle seule sait
+    ce qui, chez elle, veut dire « plus grave ». L'aller chercher après coup
+    dans `details` demanderait au lecteur de connaître un format par famille,
+    exactement ce que la forme commune existe pour éviter.
+
+    `None` est un cas légitime : une table est absente ou elle ne l'est pas, il
+    n'y a pas de « plus ou moins ». La signature porte alors `n/a`.
     """
     assert famille in FAMILLES, f"famille inconnue : {famille!r}"
     return {
@@ -100,6 +112,7 @@ def ecart(
         "type": type,
         "observe": observe,
         "reference": reference,
+        "ampleur": ampleur,
         "dama": dama,
         "details": details,
     }

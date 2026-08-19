@@ -36,7 +36,8 @@ Ajout prévu en 4.4 : un dernier filtre avant de sortir. Si la *signature* d'un
 écart a déjà été refusée par un humain, il est journalisé mais pas soumis.
 """
 
-from agent.detect import contrat, inventaire, schema, semantique, statistique
+from agent.detect import contrat, inventaire, schema, semantique, silence, statistique
+from agent.incidents import signature, texte
 from agent.state import AgentState, log_entry
 
 # L'ordre compte pour la lecture (cf. l'en-tête), pas pour le calcul : les
@@ -60,20 +61,29 @@ def detect(state: AgentState) -> dict:
         except Exception as exc:  # noqa: BLE001 — voir l'en-tête : on isole
             echecs.append(f"{nom}: {type(exc).__name__}: {exc}")
 
+    # Le filtre de silence (4.4) : ce qu'un humain a déjà refusé n'est pas
+    # resoumis. L'écart reste **constaté et journalisé** — il n'est simplement
+    # pas porté à décision. Sans les deux listes, le garde-fou anti-cécité
+    # deviendrait un vœu pieux : on ne saurait plus ce qu'on ne dit plus.
+    retenus, tus = silence.filtrer(anomalies, state.get("past_incidents"))
+
     journal = log_entry(
         "detect",
-        f"{len(anomalies)} écart(s) constaté(s)",
+        f"{len(retenus)} écart(s) constaté(s)"
+        + (f", {len(tus)} tu(s) par décision passée" if tus else ""),
         table=state["table"],
         batch_id=state["batch_id"],
-        par_famille=_compter(anomalies),
+        par_famille=_compter(retenus),
     )
+    if tus:
+        journal["signatures_tues"] = [texte(signature(a)) for a in tus]
     if echecs:
         # Un détecteur en panne est une information, pas un détail
         # d'implémentation : sans cette trace, l'agent paraîtrait avoir
         # regardé là où il n'a rien vu.
         journal["familles_en_echec"] = echecs
 
-    return {"anomalies": anomalies, "logs": [journal]}
+    return {"anomalies": retenus, "logs": [journal]}
 
 
 def _compter(anomalies: list) -> dict:

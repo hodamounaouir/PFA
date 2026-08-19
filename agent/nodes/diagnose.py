@@ -28,6 +28,8 @@ la mémoire, qui permet de citer un incident identique déjà tranché (objectif
 """
 
 from agent.llm import MODELE, diagnostiquer, repondre
+from agent.sql_guard import controler
+from agent.tools.read_past_incidents import incidents_similaires, resumer
 from agent.state import AgentState, echange, log_entry
 
 
@@ -48,11 +50,23 @@ def construire_contexte(state: AgentState) -> dict:
         "lignes_dans_le_lot": profil.get("row_count"),
         "colonnes_profilees": sorted(profil.get("columns", {})),
         "ecarts_constates": state["anomalies"],
-        "incidents_similaires_passes": state["past_incidents"],
+        # ⚠️ **Frontière R2, et elle a changé de nature en 4.4.** `past_incidents`
+        # porte le JSON complet des anomalies passées — donc potentiellement des
+        # valeurs de données. On ne le transmet pas : `resumer()` énumère champ
+        # par champ ce qui sort, exactement comme cette fonction le fait pour le
+        # profil. Et `incidents_similaires` restreint à ce qui partage une
+        # signature avec les écarts du jour : au-delà, le contexte grossit sans
+        # que le diagnostic s'améliore.
+        "incidents_similaires_passes": _memoire(state),
         "contrat_version": state["contract_version"],
         # le diagnostic déjà rendu, quand l'humain revient poser une question
         "diagnostic_deja_rendu": state["diagnosis"],
     }
+
+
+def _memoire(state: AgentState) -> list:
+    """Les incidents passés que le modèle a le droit de voir, et eux seuls."""
+    return resumer(incidents_similaires(state["past_incidents"], state["anomalies"]))
 
 
 def question_en_attente(state: AgentState) -> str | None:
@@ -146,14 +160,27 @@ def diagnose(state: AgentState) -> dict:
             ],
         }
 
-    return {
-        "diagnosis": diagnostic.model_dump(),
-        "logs": [
-            log_entry(
-                "diagnose",
-                "diagnostic produit",
-                anomalies=len(anomalies),
-                modele=MODELE,
-            )
-        ],
-    }
+    rendu = diagnostic.model_dump()
+
+    # Garde-fou SQL (4.4) — **première ligne de défense, pas la dernière.** On
+    # constate, on attache, on laisse passer : c'est `apply` qui refusera
+    # d'exécuter (phase 5). Le but est que l'humain voie le problème **avant**
+    # de décider, pas qu'il découvre après coup pourquoi sa décision est
+    # inapplicable. Le diagnostic est conservé tel quel — l'amputer priverait le
+    # lecteur du raisonnement qui l'a produit, qui reste utile même si le SQL
+    # proposé est mauvais.
+    alertes = controler(rendu.get("proposed_fix"), state["table"])
+    if alertes:
+        rendu["alertes_sql"] = alertes
+
+    journal = log_entry(
+        "diagnose",
+        "diagnostic produit",
+        anomalies=len(anomalies),
+        modele=MODELE,
+        incidents_cites=len(_memoire(state)),
+    )
+    if alertes:
+        journal["alertes_sql"] = alertes
+
+    return {"diagnosis": rendu, "logs": [journal]}

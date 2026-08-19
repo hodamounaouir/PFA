@@ -45,6 +45,7 @@ RACINE = Path(__file__).resolve().parent.parent.parent
 OPS_SCHEMA = "OPS"
 SCHEMA_HISTORY = "_SCHEMA_HISTORY"
 PROFILES = "_PROFILES"
+INCIDENTS = "INCIDENTS"
 
 # Ce qui est conservé d'un profil, et ce qui ne l'est pas (phase 4.3).
 #
@@ -299,6 +300,138 @@ class MemoireOps:
         for colonne, metrique, valeur in curseur.fetchall():
             series.setdefault((colonne, metrique), []).append(float(valeur))
         return series
+
+    # -- Les incidents : le journal métier, la mémoire, la source du benchmark -
+
+    def _creer_incidents(self, curseur) -> None:
+        """Crée `OPS.INCIDENTS` si besoin. Schéma du §5.5 du cahier, **plus**
+        une colonne `signatures`.
+
+        ⚠️ **Ajout au cahier, assumé.** Les signatures des anomalies du run sont
+        dérivables du JSON `anomalies` — mais seulement en Python, après lecture.
+        Les stocker à part rend deux choses possibles qui ne l'étaient pas :
+        retrouver un incident **par signature** en SQL (la mémoire de `diagnose`,
+        objectif O7), et lister les signatures qu'un humain a fait taire — c'est
+        l'écran anti-cécité de la phase 6, sans lequel l'agent devient
+        progressivement muet sans que personne s'en aperçoive.
+
+        Append-only : aucune méthode de ce module ne met à jour ni ne supprime
+        une ligne. Un journal qu'on peut réécrire n'est pas un journal.
+        """
+        curseur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.base}.{OPS_SCHEMA}.{INCIDENTS} (
+                incident_id        VARCHAR,
+                run_ts             TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                dataset            VARCHAR,
+                layer              VARCHAR,
+                table_name         VARCHAR,
+                batch_id           VARCHAR,
+                anomalies          VARCHAR,
+                signatures         VARCHAR,
+                diagnosis          VARCHAR,
+                proposed_fix       VARCHAR,
+                human_decision     VARCHAR,
+                decided_by         VARCHAR,
+                decided_at         VARCHAR,
+                applied_fix        VARCHAR,
+                validation_status  VARCHAR,
+                duration_s         FLOAT
+            )
+            """
+        )
+
+    def ecrire_incident(self, incident: dict) -> str:
+        """Ajoute une ligne au journal. Rend l'`incident_id`.
+
+        Les champs structurés (`anomalies`, `signatures`, `diagnosis`) partent en
+        **JSON dans du VARCHAR** plutôt qu'en `VARIANT` : c'est ce qui garde le
+        module lisible par un connecteur qui ne serait pas Snowflake le jour où
+        la mémoire changera de moteur. Le coût est nul à ce volume — une ligne
+        par run et par table.
+        """
+        curseur = self._curseur()
+        self._creer_incidents(curseur)
+
+        colonnes = [
+            "incident_id",
+            "dataset",
+            "layer",
+            "table_name",
+            "batch_id",
+            "anomalies",
+            "signatures",
+            "diagnosis",
+            "proposed_fix",
+            "human_decision",
+            "decided_by",
+            "decided_at",
+            "applied_fix",
+            "validation_status",
+            "duration_s",
+        ]
+        valeurs = [incident.get(c) for c in colonnes]
+        curseur.execute(
+            f"INSERT INTO {self.base}.{OPS_SCHEMA}.{INCIDENTS} "
+            f"({', '.join(colonnes)}) VALUES ({', '.join(['%s'] * len(colonnes))})",
+            tuple(valeurs),
+        )
+        return incident.get("incident_id")
+
+    def lire_incidents(self, dataset: str, table: str, limite: int = 200) -> list[dict]:
+        """Les incidents **tranchés par un humain** sur cette table (R5).
+
+        `human_decision IS NOT NULL` n'est pas un filtre de confort : un
+        incident sans décision n'a rien tranché — run encore en pause, ou clos
+        sans réponse au bout de dix échanges. Le lire comme un refus ferait
+        taire l'agent sur une question que **personne n'a jamais lue**.
+
+        Les plus récents d'abord, bornés : la mémoire doit servir, pas grossir
+        indéfiniment jusqu'à ne plus tenir dans un prompt.
+        """
+        curseur = self._curseur()
+        self._creer_incidents(curseur)
+        curseur.execute(
+            f"SELECT incident_id, batch_id, anomalies, signatures, diagnosis, "
+            f"proposed_fix, human_decision, decided_by, decided_at, applied_fix "
+            f"FROM {self.base}.{OPS_SCHEMA}.{INCIDENTS} "
+            f"WHERE dataset = %s AND table_name = %s AND human_decision IS NOT NULL "
+            f"ORDER BY run_ts DESC LIMIT {int(limite)}",
+            (dataset, table),
+        )
+        champs = (
+            "incident_id",
+            "batch_id",
+            "anomalies",
+            "signatures",
+            "diagnosis",
+            "proposed_fix",
+            "human_decision",
+            "decided_by",
+            "decided_at",
+            "applied_fix",
+        )
+        return [_decoder(dict(zip(champs, ligne))) for ligne in curseur.fetchall()]
+
+
+def _decoder(ligne: dict) -> dict:
+    """Rend les champs JSON sous forme d'objets Python.
+
+    Un JSON illisible ne fait **pas** lever : la mémoire est un confort, pas une
+    condition d'exécution. Un agent qui refuserait de tourner parce qu'une ligne
+    d'historique est corrompue serait plus fragile que s'il n'avait pas de
+    mémoire du tout.
+    """
+    import json
+
+    for champ in ("anomalies", "signatures", "diagnosis", "proposed_fix"):
+        brut = ligne.get(champ)
+        if isinstance(brut, str):
+            try:
+                ligne[champ] = json.loads(brut)
+            except (ValueError, TypeError):
+                ligne[champ] = None
+    return ligne
 
 
 def _est_un_nombre(valeur) -> bool:

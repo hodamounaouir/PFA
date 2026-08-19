@@ -299,6 +299,10 @@ def test_detect_produit_un_fait_chiffre_pas_un_jugement():
         "type",
         "observe",
         "reference",
+        # 4ᵉ terme de la signature d'anomalie (4.4) : champ de premier rang et
+        # non détail, parce que c'est lui qui décide si un écart déjà refusé
+        # doit rester silencieux ou reparler.
+        "ampleur",
         "dama",
         "details",
     }
@@ -405,6 +409,33 @@ def test_detect_ecrit_une_ligne_de_journal_au_format_commun():
     assert entry["node"] == "detect"
     assert entry["par_famille"] == {"semantique": 1}
     assert set(log_entry("x", "y")) <= set(entry)
+
+
+def test_un_ecart_deja_refuse_n_est_pas_resoumis():
+    """Le filtre de silence, vu depuis le nœud : l'écart est **constaté et
+    journalisé**, mais retiré de ce qui part en décision."""
+    from agent.incidents import signature, texte
+
+    state = etat_avec_profil(
+        {
+            "ville": {
+                "role": "categorical",
+                "coverage": 1.0,
+                "top": [
+                    {"value": "sao paulo", "count": 200},
+                    {"value": "são paulo", "count": 151},
+                ],
+            }
+        }
+    )
+    vu = detect(state)["anomalies"][0]
+    state["past_incidents"] = [
+        {"human_decision": "rejected", "signatures": [texte(signature(vu))]}
+    ]
+
+    resultat = detect(state)
+    assert resultat["anomalies"] == []
+    assert resultat["logs"][0]["signatures_tues"] == [texte(signature(vu))]
 
 
 # --- Nœud 3/8 : diagnose -----------------------------------------------------
@@ -965,6 +996,60 @@ def test_log_ne_modifie_pas_l_etat_recu():
     avant = copy.deepcopy(state)
     log(state)
     assert state == avant
+
+
+def test_log_ecrit_une_ligne_dans_incidents():
+    """Une ligne par run, **quel que soit le chemin** — c'est la source du
+    benchmark, la matière du filtre de silence, et la preuve que l'agent a
+    tourné."""
+    state = base_state()
+    log(state)
+    assert len(MEMOIRE_FACTICE.incidents) == 1
+    ligne = MEMOIRE_FACTICE.incidents[0]
+    assert ligne["table_name"] == "RAW.ORDERS"
+    assert ligne["batch_id"] == "2018-04-29"
+
+
+def test_un_run_sans_anomalie_est_journalise_aussi():
+    """⭐ « L'agent n'a rien signalé » et « l'agent n'a pas tourné » sont deux
+    choses différentes — les confondre est le pire état d'un système de
+    surveillance. Et sans les faux positifs journalisés, la précision de la
+    phase 8 est incalculable."""
+    log(base_state())
+    assert MEMOIRE_FACTICE.incidents[0]["anomalies"] == "[]"
+
+
+def test_les_signatures_sont_stockees_a_part():
+    """Dérivables du JSON des anomalies, mais seulement en Python. Les stocker
+    rend possibles la mémoire par signature (O7) et l'écran anti-cécité."""
+    from agent.detect import ecart
+
+    state = base_state()
+    state["anomalies"] = [
+        ecart(
+            "contrat",
+            "RAW.ORDERS",
+            type="nulls_interdits",
+            dama="completude",
+            colonne="C",
+            ampleur=0.3,
+        )
+    ]
+    log(state)
+    assert (
+        "RAW.ORDERS|C|nulls_interdits|-2" in MEMOIRE_FACTICE.incidents[0]["signatures"]
+    )
+
+
+def test_un_journal_indisponible_n_emporte_pas_le_run():
+    """⭐ La trace est précieuse, mais la perdre ne doit pas emporter le travail
+    déjà fait ni empêcher l'humain de voir ce qui a été constaté. Conséquence
+    assumée et **dite** : ce run-là ne comptera pas au benchmark."""
+    MEMOIRE_FACTICE.ecriture_leve = True
+    entree = log(base_state())["logs"][0]
+    assert entree["incident_id"] is None
+    assert "echec_ecriture" in entree
+    assert "indisponible" in entree["message"]
 
 
 def test_log_ne_retourne_que_du_journal():

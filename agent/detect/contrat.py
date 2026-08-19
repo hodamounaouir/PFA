@@ -73,6 +73,10 @@ def _verifier(table, colonne, clauses, stats, lignes) -> list[dict]:
                 colonne=colonne,
                 observe=manquantes,
                 reference=0,
+                # Le **taux** et non le décompte : un lot deux fois plus gros
+                # porterait deux fois plus de nulls sans que l'anomalie ait
+                # changé d'échelle, et la signature basculerait pour rien.
+                ampleur=stats.get("null_rate"),
                 clause="not_null",
                 taux=stats.get("null_rate"),
             )
@@ -95,6 +99,7 @@ def _verifier(table, colonne, clauses, stats, lignes) -> list[dict]:
                     colonne=colonne,
                     observe=distinctes,
                     reference=attendues,
+                    ampleur=(attendues - distinctes) / attendues if attendues else None,
                     clause="unique",
                     doublons=attendues - distinctes,
                 )
@@ -137,6 +142,11 @@ def _hors_bornes(table, colonne, bornes, stats) -> list[dict]:
             colonne=colonne,
             observe=list(observes),
             reference=list(bornes),
+            # De combien on sort, relativement à la largeur admise : 8000 dans
+            # [1–100] et 8 dans [1–2] ne sont pas la même anomalie, alors que
+            # leurs valeurs brutes ne le disent pas.
+            ampleur=max(abs(v - _borne_la_plus_proche(v, bornes)) for v in sorties)
+            / (abs(haut - bas) or 1),
             clause="between",
         )
     ]
@@ -168,7 +178,19 @@ def _hors_liste(table, colonne, admises, stats) -> list[dict]:
             colonne=colonne,
             observe=intruses,
             reference=sorted(connues),
+            ampleur=len(intruses),
             clause="accepted_values",
             coverage=stats.get("coverage"),
         )
     ]
+
+
+def _borne_la_plus_proche(valeur: float, bornes) -> float:
+    """De quelle borne la valeur s'est écartée — celle qu'elle a franchie.
+
+    Sans ça, l'ampleur d'un dépassement se mesurerait contre une borne
+    arbitraire : une valeur trop **basse** paraîtrait d'autant plus grave que la
+    borne haute est éloignée, ce qui n'a aucun sens.
+    """
+    bas, haut = bornes
+    return bas if valeur < bas else haut

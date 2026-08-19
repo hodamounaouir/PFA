@@ -70,6 +70,9 @@ def detecter(state: dict) -> list[dict]:
                     colonne=colonne,
                     observe=grappe["values"],
                     reference=grappe["normalized"],
+                    # Le nombre de lignes touchées : une collision sur 3 lignes
+                    # et une sur 160 000 ne sont pas le même incident.
+                    ampleur=_lignes(stats, grappe["values"]),
                     # La part du lot sur laquelle le constat porte : sans elle,
                     # « 2 écritures » ne dit pas si l'on parle de 3 lignes ou de
                     # 160 000.

@@ -53,6 +53,11 @@ def profile(state: AgentState) -> dict:
         schema_connu = memoire.lire_schema(table, avant=lot)
         contrat = loader.charger(dataset, table) or {}
         inventaire = _inventaire(dataset)
+        # La mémoire (4.4) : seulement les incidents qu'un humain a tranchés
+        # (R5, filtre porté par le SQL). Chargée ici plutôt que dans `detect`
+        # pour la même raison que le reste — les cinq familles restent des
+        # fonctions pures, donc rejouables à l'identique au benchmark.
+        incidents = memoire.lire_incidents(dataset, table)
 
         fiche = profile_table.invoke(
             {"dataset": dataset, "table": table, "batch_id": lot}
@@ -70,6 +75,7 @@ def profile(state: AgentState) -> dict:
                 "contract": contrat,
                 "contract_version": contrat.get("version"),
                 "inventory": inventaire,
+                "past_incidents": incidents,
                 "logs": [
                     log_entry(
                         "profile",
@@ -90,6 +96,7 @@ def profile(state: AgentState) -> dict:
             "contract": contrat,
             "contract_version": contrat.get("version"),
             "inventory": inventaire,
+            "past_incidents": incidents,
             "logs": [
                 log_entry(
                     "profile",

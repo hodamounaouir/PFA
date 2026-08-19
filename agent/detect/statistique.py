@@ -125,6 +125,7 @@ def _comparer(cle, valeur: float, serie: list, table: str):
             colonne=colonne,
             observe=valeur,
             reference=mediane,
+            ampleur=abs(valeur - mediane),
             metrique=metrique,
             ecart_brut=valeur - mediane,
             lots_de_reference=len(serie),
@@ -142,6 +143,9 @@ def _comparer(cle, valeur: float, serie: list, table: str):
         colonne=colonne,
         observe=valeur,
         reference=mediane,
+        # Le score et non la valeur : c'est lui qui dit *à quel point* le lot
+        # s'écarte, indépendamment de l'échelle de la métrique.
+        ampleur=abs(z),
         metrique=metrique,
         z=round(z, 2),
         mad=mad,
