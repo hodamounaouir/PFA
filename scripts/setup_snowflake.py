@@ -32,7 +32,18 @@ def main() -> int:
     )
 
     statements = [
-        # Économie de crédits : le warehouse s'endort après 60 s d'inactivité
+        # Un compte neuf n'a pas forcément de warehouse, et le nom du warehouse
+        # par défaut a varié selon les époques et les régions. On le crée donc
+        # au lieu de supposer qu'il existe : sans ça, rejouer l'infrastructure
+        # sur un second trial (le plan B de l'ADR 001) échouait dès la première
+        # instruction — précisément le jour où le script doit servir.
+        # `INITIALLY_SUSPENDED` pour ne pas consommer de crédits à la création.
+        f"CREATE WAREHOUSE IF NOT EXISTS {warehouse} WITH "
+        f"WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE "
+        f"INITIALLY_SUSPENDED = TRUE",
+        # Économie de crédits : le warehouse s'endort après 60 s d'inactivité.
+        # Conservé pour le cas où il *préexistait* — le CREATE ci-dessus n'aurait
+        # alors rien fait, et il pourrait traîner un auto-suspend trop long.
         f"ALTER WAREHOUSE {warehouse} SET AUTO_SUSPEND = 60",
         f"CREATE DATABASE IF NOT EXISTS {DATABASE}",
     ]

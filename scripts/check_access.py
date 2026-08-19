@@ -12,6 +12,15 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Ce script est le seul du projet qu'on lance par son chemin
+# (`python scripts/check_access.py`) et non en `-m scripts.…` : c'est la
+# commande écrite dans le README, dans CONTRIBUTING et dans la Definition of
+# Done de la phase 0 — un tiers qui clone le repo tape celle-là. Lancé ainsi,
+# Python met `scripts/` sur le chemin d'import et non la racine, donc
+# `import agent` échoue. On ajoute la racine plutôt que de changer une commande
+# que la documentation promet.
+sys.path.insert(0, str(PROJECT_ROOT))
+
 
 def check_snowflake() -> str:
     import snowflake.connector
@@ -37,13 +46,34 @@ def check_snowflake() -> str:
 def check_groq() -> str:
     from groq import Groq
 
+    # Le nom du modèle est importé, pas recopié : le 2026-08-17, Groq a
+    # décommissionné `llama-3.3-70b-versatile` et ce script testait encore le
+    # modèle mort après correction de `agent/llm.py`. Un contrôle d'accès qui
+    # valide autre chose que ce que le code appelle ne contrôle rien.
+    from agent.llm import MODELE
+
     client = Groq(api_key=os.environ["GROQ_API_KEY"], timeout=30)
     reply = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=MODELE,
         messages=[{"role": "user", "content": "Réponds uniquement : OK"}],
-        max_tokens=5,
+        # `gpt-oss-120b` est un modèle de **raisonnement** : il dépense des
+        # tokens dans un champ `reasoning` séparé avant d'écrire sa réponse.
+        # Les 5 tokens qui suffisaient à Llama partaient entièrement dans la
+        # réflexion, et `content` revenait **vide** (`finish_reason="length"`).
+        max_tokens=100,
     )
-    return f"LLM répond : {reply.choices[0].message.content.strip()!r}"
+    contenu = (reply.choices[0].message.content or "").strip()
+
+    # On vérifie ce qui est revenu, au lieu de se contenter de « aucune
+    # exception ». Sans cette ligne le contrôle affichait ✅ sur une réponse
+    # vide : un contrôle qui ne peut pas échouer ne prouve rien — c'est la même
+    # règle que la vérification par mutation appliquée à la suite de tests.
+    if contenu != "OK":
+        raise AssertionError(
+            f"réponse inattendue {contenu!r} "
+            f"(finish_reason={reply.choices[0].finish_reason})"
+        )
+    return f"LLM répond : {contenu!r} ({MODELE})"
 
 
 def check_olist() -> str:

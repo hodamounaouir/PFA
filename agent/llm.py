@@ -37,7 +37,20 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 # Validé en phase 0.2 (`scripts/check_access.py`) — modèle gratuit chez Groq.
-MODELE = "llama-3.3-70b-versatile"
+#
+# Changé le 2026-08-17 : `llama-3.3-70b-versatile` a été **décommissionné** par
+# Groq (404 `model_not_found`), comme toute la famille Llama. Remplaçant retenu
+# après essai dans les conditions réelles du projet — mode JSON natif +
+# `temperature=0` : `gpt-oss-120b` et `gpt-oss-20b` rendent les trois clés
+# attendues, `qwen3.6-27b` échoue en `json_validate_failed`. On prend le 120b,
+# de la même gamme que le 70b remplacé.
+#
+# Leçon : un fournisseur de modèles gratuits retire ses modèles sans préavis
+# utile. C'est le nom du modèle qui est fragile, pas la couture — et il ne vit
+# **qu'ici** (R1, une seule frontière réseau), donc la migration a coûté une
+# ligne. Le benchmark de la phase 8 devra dire quel modèle a produit ses
+# chiffres, sans quoi ils ne seront pas reproductibles.
+MODELE = "openai/gpt-oss-120b"
 
 # Le LLM n'a pas à être créatif : on veut un diagnostic reproductible, pas une
 # variation à chaque appel. La phase 8 mesurera quand même chaque métrique

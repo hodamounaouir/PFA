@@ -1,5 +1,10 @@
 # Secrets
-.env
+# `.env*` et non `.env` : un `.env.bak`, `.env.local` ou `.env.old` porte les
+# mêmes secrets et n'était PAS couvert — vérifié le 2026-08-17, une sauvegarde
+# `.env.bak-crlf` apparaissait en untracked, donc à un `git add -A` du commit.
+.env*
+# ...sauf le modèle sans valeurs, qui doit rester versionné.
+!.env.example
 
 # Environnement Python
 .venv/
