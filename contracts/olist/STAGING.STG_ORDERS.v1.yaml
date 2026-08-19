@@ -1,0 +1,48 @@
+table: STAGING.STG_ORDERS
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 9991
+columns:
+  ORDER_ID:
+    role: identifier
+    unique: true
+    not_null: true
+  CUSTOMER_ID:
+    role: identifier
+    unique: true
+    not_null: true
+  ORDER_STATUS:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+    accepted_values:
+    - canceled
+    - delivered
+    - invoiced
+    - processing
+    - shipped
+    - unavailable
+  ORDER_PURCHASE_TS:
+    role: temporal
+    not_null: true
+  ORDER_PURCHASE_DATE:
+    role: temporal
+    not_null: true
+  ORDER_APPROVED_TS:
+    role: temporal
+  ORDER_DELIVERED_CARRIER_TS:
+    role: temporal
+  ORDER_DELIVERED_CUSTOMER_TS:
+    role: temporal
+  ORDER_ESTIMATED_DELIVERY_TS:
+    role: temporal
+    not_null: true
+  _BATCH_ID:
+    role: temporal
+    not_null: true
+  _INGESTED_AT:
+    role: temporal
+    not_null: true
+warnings: []

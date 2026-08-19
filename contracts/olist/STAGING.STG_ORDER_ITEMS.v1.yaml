@@ -1,0 +1,56 @@
+table: STAGING.STG_ORDER_ITEMS
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 11378
+columns:
+  ORDER_ITEM_SK:
+    role: identifier
+    unique: true
+    not_null: true
+  ORDER_ID:
+    role: free_text
+    not_null: true
+  ORDER_ITEM_ID:
+    role: numeric
+    not_null: true
+    between:
+    - 1
+    - 13
+  PRODUCT_ID:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+  SELLER_ID:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+  SHIPPING_LIMIT_TS:
+    role: temporal
+    not_null: true
+  PRICE:
+    role: numeric
+    not_null: true
+    between:
+    - 4.99
+    - 4099.99
+  FREIGHT_VALUE:
+    role: numeric
+    not_null: true
+    between:
+    - 0.02
+    - 338.3
+  _BATCH_ID:
+    role: temporal
+    not_null: true
+  _INGESTED_AT:
+    role: temporal
+    not_null: true
+warnings:
+- column: PRODUCT_ID
+  kind: partial_evidence
+  detail: les valeurs relevées ne couvrent que 7% des lignes
+- column: SELLER_ID
+  kind: partial_evidence
+  detail: les valeurs relevées ne couvrent que 24% des lignes

@@ -1,0 +1,51 @@
+table: RAW.ORDERS
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 9991
+columns:
+  _BATCH_ID:
+    role: temporal
+    not_null: true
+  _SOURCE:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+    accepted_values:
+    - orders.csv
+  _INGESTED_AT:
+    role: temporal
+    not_null: true
+  ORDER_ID:
+    role: identifier
+    unique: true
+    not_null: true
+  CUSTOMER_ID:
+    role: identifier
+    unique: true
+    not_null: true
+  ORDER_STATUS:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+    accepted_values:
+    - canceled
+    - delivered
+    - invoiced
+    - processing
+    - shipped
+    - unavailable
+  ORDER_PURCHASE_TIMESTAMP:
+    role: temporal
+    not_null: true
+  ORDER_APPROVED_AT:
+    role: temporal
+  ORDER_DELIVERED_CARRIER_DATE:
+    role: temporal
+  ORDER_DELIVERED_CUSTOMER_DATE:
+    role: temporal
+  ORDER_ESTIMATED_DELIVERY_DATE:
+    role: temporal
+    not_null: true
+warnings: []

@@ -1,0 +1,23 @@
+table: MARTS.FCT_AVG_ORDER_VALUE
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 43
+columns:
+  SALES_DATE:
+    role: temporal
+    not_null: true
+  N_ORDERS:
+    role: numeric
+    not_null: true
+    between:
+    - 164
+    - 303
+  AVG_ORDER_VALUE:
+    role: numeric
+    not_null: true
+    between:
+    - 133.3345
+    - 220.48545455
+warnings: []

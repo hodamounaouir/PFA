@@ -1,0 +1,55 @@
+table: MARTS.FCT_GEOLOCATION_BY_CITY
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 6326
+columns:
+  GEOLOCATION_STATE:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+    accepted_values:
+    - AC
+    - AL
+    - AM
+    - AP
+    - BA
+    - CE
+    - DF
+    - ES
+    - GO
+    - MA
+    - MG
+    - MS
+    - MT
+    - PA
+    - PB
+    - PE
+    - PI
+    - PR
+    - RJ
+    - RN
+    - RO
+    - RR
+    - RS
+    - SC
+    - SE
+    - SP
+    - TO
+  GEOLOCATION_CITY:
+    role: free_text
+    not_null: true
+  N_POINTS:
+    role: numeric
+    not_null: true
+    between:
+    - 1
+    - 160719
+  N_ZIP_PREFIXES:
+    role: numeric
+    not_null: true
+    between:
+    - 1
+    - 3185
+warnings: []

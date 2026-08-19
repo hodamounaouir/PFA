@@ -1,0 +1,50 @@
+table: RAW.ORDER_PAYMENTS
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 10388
+columns:
+  _BATCH_ID:
+    role: temporal
+    not_null: true
+  _SOURCE:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+    accepted_values:
+    - order_payments.csv
+  _INGESTED_AT:
+    role: temporal
+    not_null: true
+  ORDER_ID:
+    role: free_text
+    not_null: true
+  PAYMENT_SEQUENTIAL:
+    role: numeric
+    not_null: true
+    between:
+    - 1.0
+    - 15.0
+  PAYMENT_TYPE:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+    accepted_values:
+    - boleto
+    - credit_card
+    - debit_card
+    - voucher
+  PAYMENT_INSTALLMENTS:
+    role: numeric
+    not_null: true
+    between:
+    - 1.0
+    - 20.0
+  PAYMENT_VALUE:
+    role: numeric
+    not_null: true
+    between:
+    - 0.14
+    - 4175.26
+warnings: []

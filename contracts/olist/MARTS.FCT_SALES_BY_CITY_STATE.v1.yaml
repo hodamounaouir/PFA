@@ -1,0 +1,55 @@
+table: MARTS.FCT_SALES_BY_CITY_STATE
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 1569
+columns:
+  CUSTOMER_STATE:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+    accepted_values:
+    - AC
+    - AL
+    - AM
+    - AP
+    - BA
+    - CE
+    - DF
+    - ES
+    - GO
+    - MA
+    - MG
+    - MS
+    - MT
+    - PA
+    - PB
+    - PE
+    - PI
+    - PR
+    - RJ
+    - RN
+    - RO
+    - RR
+    - RS
+    - SC
+    - SE
+    - SP
+    - TO
+  CUSTOMER_CITY:
+    role: free_text
+    not_null: true
+  N_ORDERS:
+    role: numeric
+    not_null: true
+    between:
+    - 1
+    - 1661
+  REVENUE:
+    role: numeric
+    not_null: true
+    between:
+    - 17.61
+    - 251977.85
+warnings: []

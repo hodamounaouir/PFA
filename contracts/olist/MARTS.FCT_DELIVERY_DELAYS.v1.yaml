@@ -1,0 +1,27 @@
+table: MARTS.FCT_DELIVERY_DELAYS
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 9720
+columns:
+  ORDER_ID:
+    role: identifier
+    unique: true
+    not_null: true
+  ORDER_PURCHASE_DATE:
+    role: temporal
+    not_null: true
+  DELIVERY_DAYS:
+    role: numeric
+    not_null: true
+    between:
+    - 1
+    - 108
+  DELAY_VS_ESTIMATE:
+    role: numeric
+    not_null: true
+    between:
+    - -147
+    - 81
+warnings: []

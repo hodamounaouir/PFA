@@ -1,0 +1,71 @@
+table: STAGING.STG_GEOLOCATION
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 1000163
+columns:
+  GEOLOCATION_ZIP_CODE_PREFIX:
+    role: numeric
+    not_null: true
+    between:
+    - 1001.0
+    - 99990.0
+  GEOLOCATION_LAT:
+    role: numeric
+    not_null: true
+    between:
+    - -36.6053744107061
+    - 45.06593318269697
+  GEOLOCATION_LNG:
+    role: numeric
+    not_null: true
+    between:
+    - -101.46676644931476
+    - 121.10539381057764
+  GEOLOCATION_CITY:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+  GEOLOCATION_STATE:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+    accepted_values:
+    - AC
+    - AL
+    - AM
+    - AP
+    - BA
+    - CE
+    - DF
+    - ES
+    - GO
+    - MA
+    - MG
+    - MS
+    - MT
+    - PA
+    - PB
+    - PE
+    - PI
+    - PR
+    - RJ
+    - RN
+    - RO
+    - RR
+    - RS
+    - SC
+    - SE
+    - SP
+    - TO
+  _BATCH_ID:
+    role: temporal
+    not_null: true
+  _INGESTED_AT:
+    role: temporal
+    not_null: true
+warnings:
+- column: GEOLOCATION_CITY
+  kind: partial_evidence
+  detail: les valeurs relevées ne couvrent que 39% des lignes

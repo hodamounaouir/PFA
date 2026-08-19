@@ -1,0 +1,66 @@
+table: STAGING.STG_CUSTOMERS
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 9991
+columns:
+  CUSTOMER_ID:
+    role: identifier
+    unique: true
+    not_null: true
+  CUSTOMER_UNIQUE_ID:
+    role: free_text
+    not_null: true
+  CUSTOMER_ZIP_CODE_PREFIX:
+    role: numeric
+    not_null: true
+    between:
+    - 1005.0
+    - 99955.0
+  CUSTOMER_CITY:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+  CUSTOMER_STATE:
+    role: categorical
+    no_semantic_collisions: true
+    not_null: true
+    accepted_values:
+    - AC
+    - AL
+    - AM
+    - AP
+    - BA
+    - CE
+    - DF
+    - ES
+    - GO
+    - MA
+    - MG
+    - MS
+    - MT
+    - PA
+    - PB
+    - PE
+    - PI
+    - PR
+    - RJ
+    - RN
+    - RO
+    - RR
+    - RS
+    - SC
+    - SE
+    - SP
+    - TO
+  _BATCH_ID:
+    role: temporal
+    not_null: true
+  _INGESTED_AT:
+    role: temporal
+    not_null: true
+warnings:
+- column: CUSTOMER_CITY
+  kind: partial_evidence
+  detail: les valeurs relevées ne couvrent que 43% des lignes

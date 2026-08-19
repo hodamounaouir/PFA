@@ -1,0 +1,130 @@
+table: STAGING.STG_PRODUCTS
+version: 1
+status: proposed
+source:
+  batch_id: null
+  row_count: 32951
+columns:
+  PRODUCT_ID:
+    role: identifier
+    unique: true
+    not_null: true
+  PRODUCT_CATEGORY_NAME:
+    role: categorical
+    no_semantic_collisions: true
+    accepted_values:
+    - agro_industria_e_comercio
+    - alimentos
+    - alimentos_bebidas
+    - artes
+    - artes_e_artesanato
+    - artigos_de_festas
+    - artigos_de_natal
+    - audio
+    - automotivo
+    - bebes
+    - bebidas
+    - beleza_saude
+    - brinquedos
+    - cama_mesa_banho
+    - casa_conforto
+    - casa_conforto_2
+    - casa_construcao
+    - cds_dvds_musicais
+    - cine_foto
+    - climatizacao
+    - consoles_games
+    - construcao_ferramentas_construcao
+    - construcao_ferramentas_ferramentas
+    - construcao_ferramentas_iluminacao
+    - construcao_ferramentas_jardim
+    - construcao_ferramentas_seguranca
+    - cool_stuff
+    - dvds_blu_ray
+    - eletrodomesticos
+    - eletrodomesticos_2
+    - eletronicos
+    - eletroportateis
+    - esporte_lazer
+    - fashion_bolsas_e_acessorios
+    - fashion_calcados
+    - fashion_esporte
+    - fashion_roupa_feminina
+    - fashion_roupa_infanto_juvenil
+    - fashion_roupa_masculina
+    - fashion_underwear_e_moda_praia
+    - ferramentas_jardim
+    - flores
+    - fraldas_higiene
+    - industria_comercio_e_negocios
+    - informatica_acessorios
+    - instrumentos_musicais
+    - la_cuisine
+    - livros_importados
+    - livros_interesse_geral
+    - livros_tecnicos
+    - malas_acessorios
+    - market_place
+    - moveis_colchao_e_estofado
+    - moveis_cozinha_area_de_servico_jantar_e_jardim
+    - moveis_decoracao
+    - moveis_escritorio
+    - moveis_quarto
+    - moveis_sala
+    - musica
+    - papelaria
+    - pc_gamer
+    - pcs
+    - perfumaria
+    - pet_shop
+    - portateis_casa_forno_e_cafe
+    - portateis_cozinha_e_preparadores_de_alimentos
+    - relogios_presentes
+    - seguros_e_servicos
+    - sinalizacao_e_seguranca
+    - tablets_impressao_imagem
+    - telefonia
+    - telefonia_fixa
+    - utilidades_domesticas
+  PRODUCT_NAME_LENGTH:
+    role: numeric
+    between:
+    - 5
+    - 76
+  PRODUCT_DESCRIPTION_LENGTH:
+    role: numeric
+    between:
+    - 4
+    - 3992
+  PRODUCT_PHOTOS_QTY:
+    role: numeric
+    between:
+    - 1
+    - 20
+  PRODUCT_WEIGHT_G:
+    role: numeric
+    between:
+    - 0.0
+    - 40425.0
+  PRODUCT_LENGTH_CM:
+    role: numeric
+    between:
+    - 7.0
+    - 105.0
+  PRODUCT_HEIGHT_CM:
+    role: numeric
+    between:
+    - 2.0
+    - 105.0
+  PRODUCT_WIDTH_CM:
+    role: numeric
+    between:
+    - 6.0
+    - 118.0
+  _BATCH_ID:
+    role: temporal
+    not_null: true
+  _INGESTED_AT:
+    role: temporal
+    not_null: true
+warnings: []
