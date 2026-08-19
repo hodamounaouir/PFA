@@ -41,6 +41,11 @@ d'une autre table » exige de regarder *deux* tables : aucune statistique de la
 colonne seule ne peut la révéler. Elle est donc absente de ce module et traitée
 à part (4.2.2), avec la comparaison croisée qu'elle réclame.
 
+**Une mesure entière et unique sur un petit lot reste indiscernable d'une
+clé.** La décimale trahit `REVENUE` (12 345,67) ; un comptage journalier qui se
+trouverait tout distinct sur 43 jours, non. Le fait mesuré manque, et l'inventer
+coûterait plus cher que de le dire : c'est la validation humaine qui tranche.
+
 **Un code non unique reste indiscernable d'une quantité.** Un préfixe de code
 postal (`01001`) se lit comme un nombre, se répète, et n'est unique nulle part :
 il sera classé `numeric` et recevra une médiane qui ne veut rien dire. Aucun fait
@@ -53,6 +58,7 @@ où passe la frontière entre ce qu'on mesure et ce qu'on sait.
 """
 
 import datetime
+import math
 import re
 from typing import Optional
 
@@ -129,6 +135,30 @@ def lisible_comme_date(valeur) -> bool:
     return bool(DATE_ECRITE.match(str(valeur).strip()))
 
 
+def a_une_partie_fractionnaire(valeur) -> bool:
+    """La valeur est-elle un nombre **non entier** ?
+
+    Sert à distinguer une grandeur continue d'un identifiant. Un identifiant
+    peut être un entier ; il n'est jamais un nombre à virgule — rien n'identifie
+    à 18,12 près.
+
+    On éprouve la **valeur**, pas son écriture : `"18.00"` n'est qu'un formatage
+    monétaire, et le compter comme fractionnaire ferait dépendre le classement
+    du nombre de décimales qu'un backend choisit d'afficher.
+    """
+    if not lisible_comme_nombre(valeur):
+        return False
+    nombre = (
+        float(valeur)
+        if isinstance(valeur, (int, float))
+        else float(str(valeur).strip())
+    )
+    # `int()` lève sur inf et NaN — que `lisible_comme_nombre` laisse passer
+    # quand ils arrivent déjà typés depuis la base, et non écrits en toutes
+    # lettres. Un infini n'est de toute façon ni un identifiant ni une mesure.
+    return math.isfinite(nombre) and nombre != int(nombre)
+
+
 def classer(stats: dict, row_count: int) -> str:
     """Le rôle d'une colonne, déduit de ses seuls agrégats.
 
@@ -158,9 +188,35 @@ def classer(stats: dict, row_count: int) -> str:
     unicite = distinct / row_count
     sans_trou = not stats.get("null_count")
 
-    # 2. Identifiant : unique **et** jamais nul. Les deux, sinon une colonne de
-    #    montants d'un petit lot passerait pour une clé primaire.
-    if unicite >= RATIO_UNICITE_MIN and sans_trou:
+    # Une grandeur continue n'identifie rien, même quand elle ne se répète pas.
+    grandeur_continue = a_une_partie_fractionnaire(mini) or a_une_partie_fractionnaire(
+        maxi
+    )
+
+    # 2. Identifiant : unique, jamais nul — **et pas une grandeur continue**.
+    #
+    #    La troisième condition a été ajoutée le 2026-08-17, après la première
+    #    découverte lancée sur de vraies données : `MARTS.FCT_DAILY_SALES.REVENUE`
+    #    et `MARTS.FCT_AVG_ORDER_VALUE.AVG_ORDER_VALUE` ont été classés
+    #    *identifiants*. Sur 43 jours, un montant en virgule flottante ne se
+    #    répète jamais et n'est jamais nul : il satisfait **exactement** la
+    #    signature d'une clé primaire. Les deux conditions d'origine étaient
+    #    pourtant écrites contre ce cas — elles ne suffisaient pas.
+    #
+    #    Conséquence de l'erreur, et c'est elle qui rend la correction urgente :
+    #    la colonne recevait `unique` et **perdait ses bornes**. L'agent aurait
+    #    donc vérifié l'unicité du chiffre d'affaires — en criant le jour où
+    #    deux jours font le même montant — et n'aurait surveillé *aucune*
+    #    aberration sur la métrique la plus visible du Gold. Soit précisément le
+    #    cas « 8000 dans une colonne à [1–100] » que le projet existe pour
+    #    attraper, neutralisé sur le mart qu'un jury regarde en premier.
+    #
+    #    Pourquoi la décimale plutôt qu'un plancher de lignes : « presque
+    #    unique » ne veut rien dire sur un petit lot, mais « porte des
+    #    décimales » veut dire la même chose partout — et un plancher aurait
+    #    retiré `unique` aux vraies petites tables de référence, au moment
+    #    précis où elles le violent (décision 12c).
+    if unicite >= RATIO_UNICITE_MIN and sans_trou and not grandeur_continue:
         return IDENTIFIANT
 
     # 3. Numérique : les deux bornes se lisent comme des nombres.

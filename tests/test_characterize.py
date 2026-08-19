@@ -20,6 +20,7 @@ from agent.characterize import (
     NUMERIQUE,
     TEMPOREL,
     TEXTE_LIBRE,
+    a_une_partie_fractionnaire,
     classer,
     classer_fiche,
     lisible_comme_date,
@@ -106,6 +107,84 @@ def test_un_identifiant_troue_n_en_est_plus_un():
     """Unique **et** jamais nul : les deux. Une clé primaire nulle n'existe pas,
     et un identifiant troué est plus probablement autre chose."""
     assert classer(colonne(1000, "a", "z", nulls=1), 1000) != IDENTIFIANT
+
+
+# ---------------------------------------------------------------------------
+# Une grandeur continue n'identifie rien — le cas trouvé le 2026-08-17
+# ---------------------------------------------------------------------------
+
+
+def test_une_mesure_continue_n_est_pas_un_identifiant():
+    """Le cas réel : `MARTS.FCT_DAILY_SALES.REVENUE`, 43 jours de recettes.
+
+    43 montants tous distincts, aucun nul — la signature **exacte** d'une clé
+    primaire, et les deux conditions d'origine (unique, sans trou) étaient
+    pourtant écrites contre ce cas précis. Le classer *identifier* lui donnait
+    `unique` et lui **retirait ses bornes** : l'agent aurait surveillé l'unicité
+    du chiffre d'affaires au lieu de ses aberrations.
+    """
+    assert classer(colonne(43, 12345.67, 98765.43), 43) == NUMERIQUE
+
+
+def test_la_mesure_continue_est_reconnue_meme_en_bronze():
+    """Même colonne lue en Bronze : les bornes arrivent en texte, pas typées.
+
+    Sans ce cas, le garde-fou ne vaudrait que pour Silver et Gold — donc pas
+    pour la couche où les anomalies sont injectées.
+    """
+    assert classer(colonne(43, "12345.67", "98765.43"), 43) == NUMERIQUE
+
+
+def test_un_identifiant_entier_reste_un_identifiant():
+    """Le garde-fou ne doit pas mordre sur les vraies clés.
+
+    Un identifiant peut parfaitement être un entier — une clé de substitution
+    numérique en est une. Ce qui le disqualifie, c'est la virgule, pas le fait
+    d'être un nombre. Sans ce test, « aucun nombre n'est un identifiant »
+    passerait la suite au vert en cassant les clés numériques.
+    """
+    assert classer(colonne(1000, 1, 1000), 1000) == IDENTIFIANT
+
+
+@pytest.mark.parametrize(
+    "cas,mini,maxi",
+    [
+        ("borne basse ronde", 100, 98765.43),
+        ("borne haute ronde", 100.5, 98765),
+    ],
+)
+def test_une_seule_borne_decimale_suffit_a_disqualifier(cas, mini, maxi):
+    """Un montant dont un côté tombe juste reste un montant.
+
+    Symétrique assumé du « LES DEUX bornes » exigé ailleurs : là on cherche une
+    **preuve** (c'est bien un nombre), ici un **indice** de continuité. Une
+    seule décimale suffit à établir qu'on ne compte pas des identités.
+    """
+    assert classer(colonne(43, mini, maxi), 43) != IDENTIFIANT, cas
+
+
+@pytest.mark.parametrize("valeur", [18.12, "18.12", "0.5", ".5", -3.25, "1e-3"])
+def test_ce_qui_porte_une_partie_fractionnaire(valeur):
+    assert a_une_partie_fractionnaire(valeur) is True
+
+
+@pytest.mark.parametrize(
+    "valeur", [18, 18.0, "18", "18.00", "abc", None, True, "2018-04-29"]
+)
+def test_ce_qui_n_en_porte_pas(valeur):
+    """`"18.00"` est un formatage monétaire, pas une preuve de continuité : on
+    éprouve la **valeur**, sinon le classement dépendrait du nombre de décimales
+    que le backend choisit d'afficher."""
+    assert a_une_partie_fractionnaire(valeur) is False
+
+
+@pytest.mark.parametrize("valeur", [float("inf"), float("-inf"), float("nan")])
+def test_un_infini_ne_fait_pas_lever(valeur):
+    """`int(float("inf"))` lève un `OverflowError`, `int(nan)` un `ValueError` —
+    et ces valeurs arrivent typées depuis la base, sans passer par le filtre
+    textuel. Faire tomber le classement ici tuerait le run sur la colonne même
+    qu'on cherchait à décrire."""
+    assert a_une_partie_fractionnaire(valeur) is False
 
 
 def test_une_table_vide_ne_donne_aucun_role():
