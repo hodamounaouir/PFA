@@ -59,6 +59,16 @@ class AgentState(TypedDict):
     ]  # ex. "v1" ; None si la table n'a pas encore de contrat
     schema_history: list  # OPS._SCHEMA_HISTORY — le dernier schéma connu
 
+    # Ce que la base contient vraiment, face à ce que le registre déclare
+    # (phase 4.3, famille *inventaire*). Forme :
+    #   {"present": [noms], "declared": [noms], "schemas": {nom: [colonnes]}}
+    #
+    # `schemas` n'est relevé que pour les tables **présentes et non déclarées** :
+    # ce sont les seules qu'on ne connaît pas, et les seules qui puissent porter
+    # le schéma d'une table disparue (hypothèse de renommage). Dans le cas
+    # normal il n'y en a aucune, donc l'inventaire ne coûte qu'une requête.
+    inventory: dict
+
     # --- Profile : le batch résumé en agrégats ------------------------------
     profile: dict  # volumes, nulls, cardinalités, min/max… jamais de lignes brutes
 
@@ -132,6 +142,7 @@ def new_state(dataset: str, layer: str, table: str, batch_id: str) -> AgentState
         contract={},
         contract_version=None,
         schema_history=[],
+        inventory={},
         profile={},
         profile_history={},
         anomalies=[],

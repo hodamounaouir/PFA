@@ -31,7 +31,10 @@ clients.
 """
 
 from agent import config
+from agent.connectors import fermer, ouvrir
 from agent.connectors import ops
+from agent.contracts import loader
+from agent.registry import charger as charger_registre
 from agent.state import AgentState, log_entry
 from agent.tools.profile_table import profile_table
 
@@ -44,6 +47,12 @@ def profile(state: AgentState) -> dict:
         historique = memoire.lire_historique(
             dataset, table, avant=lot, jours=config.FENETRE_HISTORIQUE_LOTS
         )
+        # Le dernier schéma connu **avant** ce lot : l'ingestion a déjà écrit
+        # celui d'aujourd'hui, et comparer le lot à lui-même ne trouverait
+        # jamais un renommage de colonne.
+        schema_connu = memoire.lire_schema(table, avant=lot)
+        contrat = loader.charger(dataset, table) or {}
+        inventaire = _inventaire(dataset)
 
         fiche = profile_table.invoke(
             {"dataset": dataset, "table": table, "batch_id": lot}
@@ -57,6 +66,10 @@ def profile(state: AgentState) -> dict:
             return {
                 "profile": {},
                 "profile_history": historique,
+                "schema_history": schema_connu,
+                "contract": contrat,
+                "contract_version": contrat.get("version"),
+                "inventory": inventaire,
                 "logs": [
                     log_entry(
                         "profile",
@@ -73,6 +86,10 @@ def profile(state: AgentState) -> dict:
         return {
             "profile": fiche,
             "profile_history": historique,
+            "schema_history": schema_connu,
+            "contract": contrat,
+            "contract_version": contrat.get("version"),
+            "inventory": inventaire,
             "logs": [
                 log_entry(
                     "profile",
@@ -101,3 +118,35 @@ def _lots(historique: dict) -> int:
     référence » est une explication, « aucune anomalie » n'en est pas une.
     """
     return max((len(v) for v in historique.values()), default=0)
+
+
+def _inventaire(dataset: str) -> dict:
+    """Ce que la base contient, face à ce que le registre déclare.
+
+    Le relevé des **schémas** est volontairement restreint aux tables présentes
+    et *non déclarées* : ce sont les seules qu'on ne connaît pas, et les seules
+    qui puissent porter le schéma d'une table disparue — donc étayer une
+    hypothèse de renommage. Dans le cas normal il n'y en a aucune, et
+    l'inventaire ne coûte qu'une requête.
+
+    Relever le schéma de **toutes** les tables aurait coûté une requête par
+    table à chaque run — dix-sept fois quatre-vingt-douze jours chez Olist, pour
+    une information dont on n'a besoin qu'en cas d'anomalie.
+
+    Une panne d'inventaire n'est pas une panne de profilage : on rend un
+    inventaire vide et la famille *inventaire* se taira, plutôt que de conclure
+    d'une liste absente que toutes les tables ont disparu.
+    """
+    registre = charger_registre(dataset)
+    connecteur = ouvrir(registre.connector)
+    try:
+        presentes = list(connecteur.list_tables())
+        declarees = [t.name for t in registre.tables]
+        inconnues = sorted(set(presentes) - set(declarees))
+        schemas = {
+            nom: [c["name"] for c in (connecteur.get_schema(nom) or [])]
+            for nom in inconnues
+        }
+        return {"present": presentes, "declared": declarees, "schemas": schemas}
+    finally:
+        fermer(connecteur)

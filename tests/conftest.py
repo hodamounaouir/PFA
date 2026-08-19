@@ -120,18 +120,42 @@ class ProfilFactice:
             "batch_id": arguments.get("batch_id"),
             "row_count": self.row_count,
             "columns": {
-                nom: {
-                    "null_rate": 0.301 if position % 4 == 1 else 0.0,
-                    "null_count": int(
-                        self.row_count * (0.301 if position % 4 == 1 else 0.0)
-                    ),
-                    "distinct": max(1, self.row_count - position * 10),
-                    "role": "categorical",
-                    "measure": None,
-                }
+                nom: self._colonne(position)
                 for position, nom in enumerate(self.colonnes)
             },
         }
+
+    def _colonne(self, position: int) -> dict:
+        """Les agrégats d'une colonne, calculés sur sa **position**.
+
+        Sur la position et jamais sur le nom : c'est ce qui garantit que le
+        double se comporte pareil quel que soit le dataset branché — un test
+        qui passerait grâce à un nom de colonne ne prouverait rien de la
+        généricité de l'agent.
+
+        Les colonnes de position 1, 5, 9… (`position % 4 == 1`) portent une
+        **collision sémantique**. Depuis 4.3, c'est ce que le vrai `detect`
+        attrape sans référence extérieure : les tests du graphe ont besoin d'un
+        écart qui existe sans contrat signé, sans historique et sans inventaire.
+        Un taux de nulls n'aurait plus suffi — seul le contrat ou l'historique
+        savent qu'il est anormal.
+        """
+        anormale = position % 4 == 1
+        stats = {
+            "null_rate": 0.301 if anormale else 0.0,
+            "null_count": int(self.row_count * (0.301 if anormale else 0.0)),
+            "distinct": max(1, self.row_count - position * 10),
+            "role": "categorical",
+            "measure": None,
+        }
+        if anormale:
+            stats["measure"] = "top_values"
+            stats["coverage"] = 1.0
+            stats["top"] = [
+                {"value": "sao paulo", "count": 200},
+                {"value": "são paulo", "count": 151},
+            ]
+        return stats
 
 
 PROFIL_FACTICE = ProfilFactice()
@@ -164,6 +188,9 @@ class MemoireFactice:
         self.lots[(dataset, table, batch_id)] = mesures
         return len(mesures)
 
+    def lire_schema(self, table, batch_id=None, avant=None):
+        return list(REFERENCES.schema_connu)
+
     def lire_historique(self, dataset, table, avant=None, jours=None):
         lots = sorted(
             (lot, m)
@@ -185,13 +212,62 @@ class MemoireFactice:
 MEMOIRE_FACTICE = MemoireFactice()
 
 
+class TableJouet:
+    def __init__(self, name):
+        self.name = name
+
+
+class ReferencesFactices:
+    """Les trois références que `profile` charge en plus de son historique.
+
+    Rassemblées dans un seul objet piloté par les tests : contrat signé,
+    registre, et contenu réel de la base. Sans ça, chaque test du graphe devrait
+    câbler quatre `monkeypatch` pour appeler un nœud.
+    """
+
+    connector = "factice"
+
+    def __init__(self):
+        self.reinitialiser()
+
+    def reinitialiser(self) -> None:
+        self.contrat = None  # aucun contrat signé par défaut
+        self.declarees = ["UNE.TABLE", "RAW.ORDERS"]
+        self.presentes = ["UNE.TABLE", "RAW.ORDERS"]
+        self.schemas = {}  # {table: [colonnes]}
+        self.schema_connu = []  # ce que `_SCHEMA_HISTORY` rendrait
+
+    # -- vu comme un registre
+    @property
+    def tables(self):
+        return tuple(TableJouet(n) for n in self.declarees)
+
+    # -- vu comme un connecteur
+    def list_tables(self):
+        return list(self.presentes)
+
+    def get_schema(self, table):
+        colonnes = self.schemas.get(table)
+        return None if colonnes is None else [{"name": c} for c in colonnes]
+
+
+REFERENCES = ReferencesFactices()
+
+
 @pytest.fixture(autouse=True)
 def pas_de_vraie_base(monkeypatch):
     """Le double par défaut : `profile` mesure et archive, sans rien ouvrir."""
     PROFIL_FACTICE.reinitialiser()
     MEMOIRE_FACTICE.reinitialiser()
+    REFERENCES.reinitialiser()
     monkeypatch.setattr(profile_mod, "profile_table", PROFIL_FACTICE)
     monkeypatch.setattr(profile_mod.ops, "MemoireOps", lambda *a, **k: MEMOIRE_FACTICE)
+    # Les trois références chargées par `profile` depuis 4.3.
+    monkeypatch.setattr(profile_mod, "charger_registre", lambda dataset: REFERENCES)
+    monkeypatch.setattr(profile_mod, "ouvrir", lambda nom: REFERENCES)
+    monkeypatch.setattr(profile_mod, "fermer", lambda connecteur: None)
+    monkeypatch.setattr(profile_mod.loader, "charger", lambda ds, t: REFERENCES.contrat)
+    MEMOIRE_FACTICE.schema_connu = REFERENCES.schema_connu
 
 
 @pytest.fixture(autouse=True)

@@ -1,76 +1,84 @@
-"""Nœud `detect` — constate les écarts (stub, phase 3.1).
+"""Nœud `detect` — constate les écarts, ne les juge pas (phase 4.3).
 
 `detect` ne dit jamais « c'est une anomalie ». Il dit « ceci s'écarte de la
 référence R, de tant ». Qualifier l'écart — vraie anomalie ou changement métier
-légitime — c'est le travail de l'humain, et c'est pour ça que `propose` aura
-deux « non » différents (`rejected` et `amend_contract`).
+légitime — est le travail de l'humain, et c'est pour ça que `propose` offre deux
+« non » différents (`rejected` quand le cas est isolé, `amend_contract` quand
+c'est la règle qui a vieilli).
 
-**Aucun LLM ici, jamais.** La détection doit être reproductible pour être
-mesurable au benchmark (phase 8) : deux exécutions sur le même lot doivent
-rendre exactement le même verdict.
+**Aucun LLM ici, jamais** (R1). La détection doit être reproductible pour être
+mesurable au benchmark : deux exécutions sur le même lot rendent exactement le
+même verdict. Le modèle n'intervient qu'ensuite, dans `diagnose`, pour
+*expliquer* ce que ces cinq familles ont constaté.
 
-Réel en phase 4.3 — quatre familles, toutes déterministes :
+**Aucune entrée-sortie non plus.** Les cinq familles sont des fonctions pures
+sur l'état ; c'est `profile` qui a rassemblé tout ce à quoi on compare. Une
+famille qui interrogerait la base pendant qu'elle raisonne comparerait des
+choses mesurées à des instants différents — l'écart n'aurait alors pas de sens.
 
-  | Famille      | Lit                  | Seuil ?        |
-  |--------------|----------------------|----------------|
-  | schéma       | `_SCHEMA_HISTORY`    | non, binaire   |
-  | contrat      | `contracts/*.yaml`   | la clause      |
-  | statistique  | `_PROFILES`          | oui, ~3,5 MAD  |
-  | sémantique   | le lot lui-même      | non            |
+## L'ordre des familles est celui de la lecture, pas de la logique
 
-Le stub n'implémente que la famille statistique, dans sa forme la plus pauvre :
-un seuil fixe sur le taux de nulls, sans historique. Ce qui compte à ce stade,
-c'est la **forme de la sortie** — elle ne changera plus.
+`inventaire` en premier parce qu'un écart de table éclaire tous les autres :
+si la table a disparu, le profil vide qui suit n'est pas une anomalie de
+complétude, c'en est la **conséquence**. Un humain qui lit la liste dans cet
+ordre comprend en une ligne ; dans l'ordre inverse, il lit dix écarts avant
+d'apprendre pourquoi.
 
-Ajout prévu en phase 4.4 : un dernier filtre avant de sortir. Si la *signature*
-d'un écart a déjà été refusée par un humain, il est journalisé mais pas soumis.
+## Une famille qui échoue n'emporte pas les autres
+
+Cinq détecteurs indépendants : si l'un lève sur une forme de profil inattendue,
+les quatre autres doivent quand même rendre leur verdict. Un agent qui ne
+signale rien parce qu'un détecteur sur cinq a trébuché est pire qu'un agent
+partiellement aveugle — il est **silencieusement** aveugle. L'échec est
+journalisé, pas avalé.
+
+Ajout prévu en 4.4 : un dernier filtre avant de sortir. Si la *signature* d'un
+écart a déjà été refusée par un humain, il est journalisé mais pas soumis.
 """
 
+from agent.detect import contrat, inventaire, schema, semantique, statistique
 from agent.state import AgentState, log_entry
 
-# Seuil bidon. En phase 4.3 les vrais seuils vivront dans `agent/config.py` :
-# ce sont des réglages de *détection*, pas des règles de *décision*.
-STUB_NULL_THRESHOLD = 0.10
-
-
-def _ecart_nulls(table: str, colonne: str, stats: dict) -> dict | None:
-    """Un écart de complétude, ou None si la colonne est dans les clous.
-
-    Forme de sortie volontairement figée dès maintenant : les quatre familles
-    devront toutes produire ce même dictionnaire, sinon `diagnose` et le journal
-    auraient à connaître un format par famille.
-    """
-    observe = stats.get("null_rate", 0.0)
-    if observe <= STUB_NULL_THRESHOLD:
-        return None
-    return {
-        "famille": "statistique",
-        "table": table,
-        "colonne": colonne,
-        "type": "nulls",
-        "observe": observe,
-        # En 4.3 : la médiane des N derniers jours lue dans `_PROFILES`,
-        # accompagnée d'un score en MAD. Ici, faute d'historique, le seuil.
-        "reference": STUB_NULL_THRESHOLD,
-        "dama": "completude",
-    }
+# L'ordre compte pour la lecture (cf. l'en-tête), pas pour le calcul : les
+# familles sont indépendantes et ne se transmettent rien.
+FAMILLES = (
+    ("inventaire", inventaire.detecter),
+    ("schema", schema.detecter),
+    ("contrat", contrat.detecter),
+    ("statistique", statistique.detecter),
+    ("semantique", semantique.detecter),
+)
 
 
 def detect(state: AgentState) -> dict:
-    colonnes = state["profile"].get("columns", {})
-    anomalies = [
-        ecart
-        for nom, stats in colonnes.items()
-        if (ecart := _ecart_nulls(state["table"], nom, stats)) is not None
-    ]
-    return {
-        "anomalies": anomalies,
-        "logs": [
-            log_entry(
-                "detect",
-                f"{len(anomalies)} écart(s) constaté(s) (stub)",
-                batch_id=state["batch_id"],
-                colonnes_examinees=len(colonnes),
-            )
-        ],
-    }
+    anomalies: list[dict] = []
+    echecs: list[str] = []
+
+    for nom, detecter in FAMILLES:
+        try:
+            anomalies += detecter(state)
+        except Exception as exc:  # noqa: BLE001 — voir l'en-tête : on isole
+            echecs.append(f"{nom}: {type(exc).__name__}: {exc}")
+
+    journal = log_entry(
+        "detect",
+        f"{len(anomalies)} écart(s) constaté(s)",
+        table=state["table"],
+        batch_id=state["batch_id"],
+        par_famille=_compter(anomalies),
+    )
+    if echecs:
+        # Un détecteur en panne est une information, pas un détail
+        # d'implémentation : sans cette trace, l'agent paraîtrait avoir
+        # regardé là où il n'a rien vu.
+        journal["familles_en_echec"] = echecs
+
+    return {"anomalies": anomalies, "logs": [journal]}
+
+
+def _compter(anomalies: list) -> dict:
+    """Combien d'écarts par famille — le résumé que lira `INCIDENTS`."""
+    compte: dict = {}
+    for a in anomalies:
+        compte[a["famille"]] = compte.get(a["famille"], 0) + 1
+    return compte

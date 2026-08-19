@@ -68,7 +68,7 @@ from agent.state import (
 # Le double de `profile_table` (cf. conftest.py) : depuis 4.3 c'est lui, et non
 # plus l'état, qui décide des colonnes que la mesure rendra. pytest place le
 # dossier des tests sur `sys.path`, d'où l'import direct du conftest.
-from conftest import PROFIL_FACTICE
+from conftest import PROFIL_FACTICE, REFERENCES
 
 RACINE = Path(__file__).resolve().parent.parent
 
@@ -92,6 +92,18 @@ def etat(schema, **surcharges):
     # Depuis 4.3, la forme du lot se pilote là où la mesure a lieu.
     PROFIL_FACTICE.colonnes = [c["name"] for c in schema]
     state.update(surcharges)
+
+    # `profile` charge lui-même les références et **écrase** ce que l'appelant
+    # aurait posé dans l'état : c'est le nœud qui fait autorité, pas le test.
+    # Une surcharge de version se traduit donc en contrat signé côté double —
+    # la version vient désormais d'où elle vient vraiment.
+    if surcharges.get("contract_version"):
+        REFERENCES.contrat = {
+            "table": state["table"],
+            "version": surcharges["contract_version"],
+            "status": "approved",
+            "columns": {},
+        }
     return state
 
 
@@ -663,7 +675,7 @@ sys.path.insert(0, {tests!r})
 
 import importlib
 
-from conftest import MEMOIRE_FACTICE, PROFIL_FACTICE
+from conftest import MEMOIRE_FACTICE, PROFIL_FACTICE, REFERENCES
 
 # `import agent.nodes.profile` rendrait la **fonction** réexportée, pas le
 # module — le piège déjà documenté dans conftest.py et test_tools.py. Ici il se
@@ -673,6 +685,14 @@ profile_mod = importlib.import_module("agent.nodes.profile")
 
 profile_mod.profile_table = PROFIL_FACTICE
 profile_mod.ops.MemoireOps = lambda *a, **k: MEMOIRE_FACTICE
+# Les fixtures `autouse` ne franchissent pas la frontière du process : les
+# doubles des références (4.3) doivent être réinstallés ici, sinon le run
+# ouvrirait une vraie connexion — et le test de survie à la mort du process
+# mesurerait le réseau au lieu de la reprise.
+profile_mod.charger_registre = lambda dataset: REFERENCES
+profile_mod.ouvrir = lambda nom: REFERENCES
+profile_mod.fermer = lambda connecteur: None
+profile_mod.loader.charger = lambda ds, t: REFERENCES.contrat
 
 from agent.graph import agent_persistant, thread, proposition_en_attente
 from agent.state import new_state

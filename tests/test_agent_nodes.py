@@ -23,7 +23,6 @@ from agent.llm import CONSIGNES, Diagnostic
 from agent.nodes import amend, apply, detect, diagnose, log, profile, propose, validate
 from agent.nodes.amend import _version_suivante
 from agent.nodes.validate import VALIDATION_OK
-from agent.nodes.detect import STUB_NULL_THRESHOLD
 
 # Le double de `profile_table` (cf. conftest.py) : depuis 4.3 c'est lui, et non
 # plus l'état, qui décide des colonnes que la mesure rendra. pytest place le
@@ -102,19 +101,19 @@ def test_profile_s_adapte_a_n_importe_quel_dataset():
 
 
 def test_profile_calcule_les_memes_metriques_partout():
-    """Les métriques sont indépendantes du type : les mêmes pour toute colonne.
+    """Les métriques ne dépendent pas du dataset, seulement de ce qui a été mesuré.
 
-    On compare les *jeux de clés* plutôt qu'une liste figée : ce qui doit être
-    vrai, c'est qu'aucune colonne ne reçoive un traitement particulier selon le
-    dataset — pas que le profil porte telle métrique précise, qui dépend de ce
-    que le critère de mesure a décidé.
+    On compare **position par position** : la 1ʳᵉ colonne d'un dataset RH doit
+    recevoir exactement le même jeu de métriques que la 1ʳᵉ colonne d'un dataset
+    e-commerce. Comparer globalement serait faux — une colonne qui a reçu un
+    top-K porte légitimement plus de clés qu'une colonne écartée par le critère,
+    et exiger l'uniformité interdirait la mesure à la carte de 4.1.5.
     """
-    jeux = {
-        frozenset(stats)
-        for schema in (SCHEMA_COMMANDES, SCHEMA_RH)
-        for stats in profile(base_state(schema))["profile"]["columns"].values()
-    }
-    assert len(jeux) == 1, jeux
+    commandes = profile(base_state(SCHEMA_COMMANDES))["profile"]["columns"]
+    rh = profile(base_state(SCHEMA_RH))["profile"]["columns"]
+
+    for rang, (une, autre) in enumerate(zip(commandes.values(), rh.values())):
+        assert set(une) == set(autre), f"colonne de rang {rang}"
 
 
 def test_profile_sans_schema_reste_neutre():
@@ -241,35 +240,56 @@ def etat_avec_profil(colonnes: dict, table="RAW.ORDERS"):
 
 
 def test_detect_ne_signale_rien_quand_tout_est_propre():
-    """Le chemin « rien d'anormal » doit exister : c'est un des 4 du graphe."""
+    """Le chemin « rien d'anormal » doit exister : c'est un des 4 du graphe.
+
+    Aucune référence extérieure, aucune collision : les cinq familles se taisent.
+    Un profil « sale » ne suffit plus à produire un écart — depuis 4.3, il faut
+    qu'une **référence** dise en quoi il l'est.
+    """
     state = etat_avec_profil(
         {
-            "a": {"null_rate": 0.0, "distinct": 351},
-            "b": {"null_rate": 0.02, "distinct": 12},
+            "a": {"role": "categorical", "null_rate": 0.0, "distinct": 351},
+            "b": {"role": "categorical", "null_rate": 0.02, "distinct": 12},
         }
     )
     assert detect(state)["anomalies"] == []
 
 
-def test_detect_signale_la_colonne_qui_depasse():
-    state = etat_avec_profil(
-        {
-            "propre": {"null_rate": 0.0, "distinct": 351},
-            "trouee": {"null_rate": 0.301, "distinct": 245},
-        }
-    )
-    anomalies = detect(state)["anomalies"]
-    assert len(anomalies) == 1
-    assert anomalies[0]["colonne"] == "trouee"
+def test_detect_agrege_les_cinq_familles():
+    """Le nœud n'est qu'un chef d'orchestre : la logique vit dans les familles.
+
+    On vérifie ici qu'il les appelle **toutes** et concatène — le détail de
+    chacune est éprouvé dans `tests/test_detect.py`.
+    """
+    from agent.nodes.detect import FAMILLES
+
+    assert [nom for nom, _ in FAMILLES] == [
+        "inventaire",
+        "schema",
+        "contrat",
+        "statistique",
+        "semantique",
+    ]
 
 
 def test_detect_produit_un_fait_chiffre_pas_un_jugement():
-    """La forme de sortie est figée : les 4 familles devront toutes la produire.
+    """La forme de sortie est commune aux cinq familles.
 
     Aucun champ ne porte de verdict (« grave », « à corriger ») — seulement des
-    mesures. Le jugement appartient à l'humain.
+    mesures et leur référence. Le jugement appartient à l'humain.
     """
-    state = etat_avec_profil({"trouee": {"null_rate": 0.301, "distinct": 245}})
+    state = etat_avec_profil(
+        {
+            "ville": {
+                "role": "categorical",
+                "coverage": 1.0,
+                "top": [
+                    {"value": "sao paulo", "count": 200},
+                    {"value": "são paulo", "count": 151},
+                ],
+            }
+        }
+    )
     ecart = detect(state)["anomalies"][0]
 
     assert set(ecart) == {
@@ -280,51 +300,110 @@ def test_detect_produit_un_fait_chiffre_pas_un_jugement():
         "observe",
         "reference",
         "dama",
+        "details",
     }
-    assert ecart["observe"] == 0.301
-    assert ecart["reference"] == STUB_NULL_THRESHOLD
     assert ecart["table"] == "RAW.ORDERS"
+    assert ecart["colonne"] == "ville"
+    assert not {"grave", "severite", "a_corriger"} & set(ecart)
 
 
 def test_detect_marche_sur_n_importe_quel_dataset():
     """Aucun nom de colonne n'est connu d'avance : l'écart est trouvé, pas su."""
-    rh = detect(etat_avec_profil({"salaire_brut": {"null_rate": 0.4}}, "HR.EMPLOYES"))
-    capteurs = detect(
-        etat_avec_profil({"temperature_c": {"null_rate": 0.4}}, "IOT.MESURES")
-    )
 
-    assert rh["anomalies"][0]["colonne"] == "salaire_brut"
-    assert capteurs["anomalies"][0]["colonne"] == "temperature_c"
+    def collision(colonne, table):
+        return etat_avec_profil(
+            {
+                colonne: {
+                    "role": "categorical",
+                    "coverage": 1.0,
+                    "top": [
+                        {"value": "CDI", "count": 10},
+                        {"value": "cdi", "count": 3},
+                    ],
+                }
+            },
+            table,
+        )
+
+    rh = detect(collision("contrat", "HR.EMPLOYES"))
+    capteurs = detect(collision("statut", "IOT.MESURES"))
+
+    assert rh["anomalies"][0]["colonne"] == "contrat"
+    assert capteurs["anomalies"][0]["colonne"] == "statut"
 
 
 def test_detect_supporte_un_profil_vide():
     """Robustesse : un lot vide ne doit pas faire exploser le graphe."""
-    state = base_state()
-    assert detect(state)["anomalies"] == []
+    assert detect(base_state())["anomalies"] == []
+
+
+def test_une_famille_qui_leve_n_emporte_pas_les_autres(monkeypatch):
+    """⭐ Un agent silencieusement aveugle est pire qu'un agent partiel.
+
+    Si un détecteur trébuche sur une forme de profil inattendue, les quatre
+    autres doivent rendre leur verdict — et la panne doit **se voir** dans le
+    journal, sans quoi l'agent paraîtrait avoir regardé là où il n'a rien vu.
+    """
+    detect_mod = importlib.import_module("agent.nodes.detect")
+
+    def explose(state):
+        raise ValueError("profil inattendu")
+
+    monkeypatch.setattr(
+        detect_mod, "FAMILLES", (("qui_explose", explose),) + detect_mod.FAMILLES[1:]
+    )
+    resultat = detect(
+        etat_avec_profil(
+            {
+                "ville": {
+                    "role": "categorical",
+                    "coverage": 1.0,
+                    "top": [
+                        {"value": "sao paulo", "count": 200},
+                        {"value": "são paulo", "count": 151},
+                    ],
+                }
+            }
+        )
+    )
+
+    assert len(resultat["anomalies"]) == 1, "les autres familles ont été emportées"
+    assert "qui_explose" in resultat["logs"][0]["familles_en_echec"][0]
 
 
 def test_detect_s_enchaine_avec_profile():
     """Les deux nœuds bout à bout, comme dans le graphe."""
     state = base_state(SCHEMA_COMMANDES)
-    state["profile"] = profile(state)["profile"]
+    state.update(profile(state))
     anomalies = detect(state)["anomalies"]
 
-    # le stub de profile met des nulls sur la 2e colonne
+    # le double de `profile_table` pose une collision sur la 2e colonne
     assert [a["colonne"] for a in anomalies] == [SCHEMA_COMMANDES[1]["name"]]
 
 
 def test_detect_ne_modifie_pas_l_etat_recu():
-    state = etat_avec_profil({"trouee": {"null_rate": 0.301}})
+    state = etat_avec_profil({"trouee": {"role": "categorical", "null_rate": 0.301}})
     avant = copy.deepcopy(state)
     detect(state)
     assert state == avant
 
 
 def test_detect_ecrit_une_ligne_de_journal_au_format_commun():
-    state = etat_avec_profil({"a": {"null_rate": 0.0}, "b": {"null_rate": 0.5}})
+    state = etat_avec_profil(
+        {
+            "ville": {
+                "role": "categorical",
+                "coverage": 1.0,
+                "top": [
+                    {"value": "sao paulo", "count": 200},
+                    {"value": "são paulo", "count": 151},
+                ],
+            }
+        }
+    )
     entry = detect(state)["logs"][0]
     assert entry["node"] == "detect"
-    assert entry["colonnes_examinees"] == 2
+    assert entry["par_famille"] == {"semantique": 1}
     assert set(log_entry("x", "y")) <= set(entry)
 
 

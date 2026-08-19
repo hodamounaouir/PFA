@@ -99,7 +99,12 @@ class MemoireOps:
             self._conn.close()
             self._conn = None
 
-    def lire_schema(self, table: str, batch_id: Optional[str] = None) -> list[dict]:
+    def lire_schema(
+        self,
+        table: str,
+        batch_id: Optional[str] = None,
+        avant: Optional[str] = None,
+    ) -> list[dict]:
         """Le schéma connu d'une table : au batch demandé, ou au dernier observé.
 
         Rend une liste vide si la table n'a jamais été observée — une table
@@ -113,7 +118,24 @@ class MemoireOps:
         cle = _cle_de_table(table)
         curseur = self._curseur()
 
-        if batch_id is None:
+        if avant is not None:
+            # ⭐ Le dernier schéma connu **strictement avant** ce lot. Sans ce
+            # mode, la dérive de schéma serait indétectable : l'ingestion écrit
+            # `_SCHEMA_HISTORY` avant que l'agent tourne, donc « le dernier
+            # schéma observé » inclurait déjà celui d'aujourd'hui — on
+            # comparerait le lot à lui-même et le renommage du J45 passerait
+            # inaperçu. Même raisonnement que l'exclusion du lot courant dans
+            # `lire_historique` : la garantie vit dans la requête.
+            curseur.execute(
+                f"SELECT column_name, ordinal_position, batch_id "
+                f"FROM {self.base}.{OPS_SCHEMA}.{SCHEMA_HISTORY} "
+                f"WHERE LOWER(table_name) = %s AND batch_id = ("
+                f"  SELECT MAX(batch_id) FROM {self.base}.{OPS_SCHEMA}.{SCHEMA_HISTORY} "
+                f"  WHERE LOWER(table_name) = %s AND batch_id < %s) "
+                f"ORDER BY ordinal_position",
+                (cle, cle, avant),
+            )
+        elif batch_id is None:
             # `batch_id` est un VARCHAR au format ISO (`2018-04-29`) : l'ordre
             # lexicographique y coïncide avec l'ordre chronologique, donc MAX()
             # désigne bien le dernier batch observé.
