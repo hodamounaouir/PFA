@@ -19,7 +19,7 @@ from agent.connectors.ops import MemoireOps, _cle_de_table
 from agent.registry import Registre, TableDeclaree
 from agent.tools import profile_table, read_schema_history, robust_stats, top_values
 from agent.tools._connecteur import TableNonDeclaree
-from agent.tools.top_values import TOP_K_DEFAUT
+from agent.tools.top_values import CARDINALITE_ENUMERABLE_MAX, TOP_K_DEFAUT
 
 RACINE = Path(__file__).resolve().parent.parent
 
@@ -31,6 +31,8 @@ tool_mod = importlib.import_module("agent.tools.read_schema_history")
 # Le socle commun des tools qui lisent la base : c'est **lui** qui charge le
 # registre, donc c'est lui qu'on remplace — pas chaque tool.
 socle_mod = importlib.import_module("agent.tools._connecteur")
+# Même piège de réexport : on veut le **module**, pour `_k_pour`.
+_profile_table_mod = importlib.import_module("agent.tools.profile_table")
 
 
 # Ce que l'ingestion a réellement écrit en phase 2.1 : nom de fichier CSV,
@@ -466,13 +468,18 @@ class ConnecteurComplet:
         # table entière en croyant filtrer un jour, et l'anomalie cherchée se
         # diluerait dans 92 jours cumulés. C'est le bug le plus silencieux du
         # projet, et il est passé sous un sabotage avant que ce test existe.
-        self.mesures.append(("top_values", column, batch_column, batch_id))
+        # `k` est enregistré depuis le 2026-08-17 : ce n'est plus une constante
+        # mais une **décision** de l'assembleur (énumérer en entier, ou
+        # échantillonner la tête d'une longue traîne). Un argument qui porte une
+        # décision et que le mouchard ignore, c'est la même faille qu'en 4.1.5 —
+        # regarder le bon appel sans regarder les bons arguments.
+        self.mesures.append(("top_values", column, batch_column, batch_id, k))
         if column in self.MUETTE:
             return None
         return {"top": [{"value": "sao paulo", "count": 40}], "coverage": 0.4}
 
     def robust_stats(self, table, column, batch_column=None, batch_id=None):
-        self.mesures.append(("robust_stats", column, batch_column, batch_id))
+        self.mesures.append(("robust_stats", column, batch_column, batch_id, None))
         if column in self.MUETTE:
             return None
         return {
@@ -585,7 +592,7 @@ def test_le_lot_est_transmis_a_chaque_mesure_de_colonne(complet):
     )
 
     assert complet.mesures, "aucune mesure : le test ne prouverait rien"
-    for _, colonne, batch_column, batch_id in complet.mesures:
+    for _, colonne, batch_column, batch_id, _k in complet.mesures:
         assert batch_column == "_lot", f"colonne de lot perdue pour {colonne}"
         assert batch_id == "l-1", f"lot perdu pour {colonne}"
 
@@ -664,6 +671,71 @@ def test_profile_table_sur_une_table_absente(monkeypatch):
         )
     finally:
         connectors._FABRIQUES.pop("jouet_top", None)
+
+
+# ---------------------------------------------------------------------------
+# Combien de valeurs demander : la frontière est la preuve (2026-08-17)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cas,distinct,attendu",
+    [
+        # Les deux colonnes qui ont motivé le correctif, mesurées sur Olist :
+        # refusées à 99 % et 86 % de couverture par un K=20 trop étroit.
+        ("les 27 états brésiliens", 27, 27),
+        ("les 73 catégories produit", 73, 73),
+        ("une poignée de statuts", 8, 8),
+        # La frontière, des deux côtés : sans ces deux cas, un `<` mis pour un
+        # `<=` (ou l'inverse) ne ferait rougir personne.
+        ("pile à la frontière", CARDINALITE_ENUMERABLE_MAX, CARDINALITE_ENUMERABLE_MAX),
+        ("un cran au-delà", CARDINALITE_ENUMERABLE_MAX + 1, TOP_K_DEFAUT),
+        # Et la colonne qui doit RESTER refusée : ses valeurs légitimes ne
+        # tiennent dans aucune liste, l'énumérer serait un export.
+        ("les 1 552 villes d'Olist", 1552, TOP_K_DEFAUT),
+    ],
+)
+def test_k_selon_la_cardinalite(cas, distinct, attendu):
+    """Cardinalité modeste → on énumère ; longue traîne → on échantillonne.
+
+    Ce qui sépare les deux n'est pas le confort mais la **preuve** : sous le
+    seuil, la couverture atteint 1 et `accepted_values` devient démontrable ;
+    au-dessus, le `coverage` faible **est** l'information — il dit que la
+    colonne ne s'énumère pas.
+    """
+    assert _profile_table_mod._k_pour({"distinct": distinct}) == attendu, cas
+
+
+@pytest.mark.parametrize("stats", [{}, {"distinct": 0}, {"distinct": None}])
+def test_k_sur_une_colonne_sans_cardinalite(stats):
+    """On retombe sur le défaut plutôt que de demander zéro valeur.
+
+    `top_values` refuse `k < 1` : renvoyer `distinct` tel quel ferait **lever**
+    le profilage sur une colonne entièrement nulle — c'est-à-dire sur une
+    anomalie de complétude, exactement ce qu'on cherche à constater.
+    """
+    assert _profile_table_mod._k_pour(stats) == TOP_K_DEFAUT
+
+
+def test_le_k_choisi_atteint_vraiment_le_connecteur(complet):
+    """L'assembleur transmet le `k` **décidé**, pas la constante.
+
+    Sans cette vérification, `_k_pour` pourrait être parfaitement juste et
+    n'être jamais appelé. C'est la faille de 4.1.5, à l'identique : regarder le
+    bon appel sans regarder les bons arguments ne prouve rien.
+
+    `CUSTOMER_CITY` porte 12 valeurs distinctes — donc 12, et surtout **pas**
+    `TOP_K_DEFAUT`, sinon l'assertion passerait pour les deux comportements.
+    """
+    profile_table.invoke({"dataset": "jouet", "table": "RH.EMPLOYES"})
+
+    demandes = {
+        colonne: k
+        for nom, colonne, _bc, _bi, k in complet.mesures
+        if nom == "top_values"
+    }
+    assert demandes == {"CUSTOMER_CITY": 12}, demandes
+    assert 12 != TOP_K_DEFAUT, "le cas ne discrimine plus rien"
 
 
 def test_profile_table_est_bien_un_tool():

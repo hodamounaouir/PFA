@@ -51,7 +51,7 @@ from langchain_core.tools import tool
 
 from agent.characterize import CATEGORIEL, NUMERIQUE, classer
 from agent.tools._connecteur import connecteur_pour
-from agent.tools.top_values import TOP_K_DEFAUT
+from agent.tools.top_values import CARDINALITE_ENUMERABLE_MAX, TOP_K_DEFAUT
 
 # Rôle -> mesure de colonne. Les rôles absents n'en reçoivent aucune, et c'est
 # une décision : voir le tableau du docstring.
@@ -66,6 +66,32 @@ MESURE_PAR_ROLE = {
 # reliront — et `MESURE_PAR_ROLE` dit **ce qu'on lui demande**, une décision de
 # profilage. Les confondre ferait qu'ajouter une mesure obligerait à toucher au
 # classement.
+
+
+def _k_pour(stats: dict) -> int:
+    """Combien de valeurs demander à une colonne catégorielle.
+
+    Deux régimes, et ce qui les sépare est la **preuve** :
+
+    - cardinalité modeste → on demande tout (`k = distinct`) : la couverture
+      atteint 1, et `accepted_values` devient démontrable ;
+    - longue traîne → `TOP_K_DEFAUT`, et le `coverage` faible qui en résulte
+      **est** l'information — il dit que la colonne ne s'énumère pas.
+
+    `distinct` est déjà dans le profil : choisir ne coûte **aucune requête**, et
+    demander 27 valeurs au lieu de 20 n'élargit qu'un `LIMIT` sur un `GROUP BY`
+    déjà payé. C'est la même économie qu'en 4.2.1 — décider avec ce qu'on a
+    mesuré, pas en mesurant à nouveau.
+
+    R2 n'y perd rien, et y gagne plutôt : une colonne de moins de cent modalités
+    est catégorielle par n'importe quelle mesure, c'est-à-dire exactement le
+    régime où « une distribution, pas une ligne » est le plus solide. Le tool
+    continue par ailleurs de **constater** sa couverture au lieu de se censurer.
+    """
+    distinct = stats.get("distinct") or 0
+    if 0 < distinct <= CARDINALITE_ENUMERABLE_MAX:
+        return distinct
+    return TOP_K_DEFAUT
 
 
 def _assembler(connecteur, table: str, batch_column, batch_id) -> Optional[dict]:
@@ -99,7 +125,7 @@ def _assembler(connecteur, table: str, batch_column, batch_id) -> Optional[dict]
 
         if voulue == "top_values":
             mesure = connecteur.top_values(
-                table, nom, TOP_K_DEFAUT, batch_column, batch_id
+                table, nom, _k_pour(stats), batch_column, batch_id
             )
             if mesure is not None:
                 stats["top"] = mesure["top"]

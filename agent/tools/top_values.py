@@ -54,6 +54,23 @@ from agent.tools._connecteur import connecteur_pour
 # pour qu'une colonne à longue traîne se trahisse par un `coverage` faible.
 TOP_K_DEFAUT = 20
 
+# Jusqu'où une colonne catégorielle peut être **énumérée en entier**. En dessous
+# de ce seuil, `profile_table` demande autant de valeurs qu'il en existe : la
+# couverture atteint 1, et la clause `accepted_values` devient *prouvable*.
+#
+# Sans lui, le top-K tronquait des colonnes dont la preuve était pourtant à
+# portée de requête — mesuré le 2026-08-17 sur la 1ʳᵉ découverte réelle :
+# `CUSTOMER_STATE` refusée à **99 %** de couverture (27 états brésiliens contre
+# K=20) et `PRODUCT_CATEGORY_NAME` à 86 % (73 catégories). Le refus de la
+# décision 13a était juste, mais il portait sur une preuve **non demandée**
+# plutôt que sur une preuve absente — et ces deux situations ne se ressemblent
+# que de l'extérieur.
+#
+# 100 : au-delà, une énumération cesse d'être une clause qu'un humain relit et
+# devient un export. `CUSTOMER_CITY` (1 552 villes) reste donc refusée, et c'est
+# le bon résultat : ses valeurs légitimes ne tiennent dans aucune liste.
+CARDINALITE_ENUMERABLE_MAX = 100
+
 
 @tool
 def top_values(
