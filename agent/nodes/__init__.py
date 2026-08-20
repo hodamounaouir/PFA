@@ -21,6 +21,24 @@ brancher le checkpointer et `interrupt()`, écrire `scripts/decide.py`, puis
 rendre `diagnose` réel (Groq).
 """
 
+# ⚠️ **Piège de cette réexportation, à connaître avant d'écrire un test.**
+#
+# Chaque nœud est réexporté sous **le nom de son propre module** : après ces
+# imports, `agent.nodes.diagnose` désigne la *fonction*, plus le module. Un
+# `import agent.nodes.diagnose as m` rend donc silencieusement le mauvais objet,
+# et le `monkeypatch` qui suit lève un `AttributeError` qui ne ressemble pas à
+# sa cause. Pour atteindre le module :
+#
+#     diagnose_mod = importlib.import_module("agent.nodes.diagnose")
+#
+# Le piège s'est manifesté **cinq fois** (conftest, test_tools, le lanceur de
+# sous-processus, `nodes/log.py`, `test_preuves`). Reconsidéré à la cinquième et
+# **conservé** : le supprimer demanderait de renommer les huit fonctions ou de
+# casser `from agent.nodes import …` dans `graph.py` et la moitié des tests,
+# pour un défaut qui coûte une minute à qui a lu ce commentaire. L'avertissement
+# vit désormais **ici**, à l'endroit où on le cherche, et plus seulement dans
+# les fichiers qui s'y sont fait prendre.
+
 from agent.nodes.amend import amend
 from agent.nodes.apply import apply
 from agent.nodes.detect import detect

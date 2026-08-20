@@ -302,11 +302,24 @@ class ReferencesFactices:
         self.contrats_ecrits.append(contrat)
         return f"/tmp/{dataset}/{contrat['table']}.v{contrat['version']}.yaml"
 
+    # Le « nombre de lignes » que la base contient, du point de vue du double.
+    # Il ne bouge que si `appliquer()` est appelé — c'est ce qui permet de
+    # **prouver par comptage** qu'un chemin n'a rien écrit (preuve 5.4).
+    lignes_en_base = 351
+
     def appliquer(self, sql, table, batch_column=None, batch_id=None):
         self.corrections.append((sql, table, batch_id))
         if self.ecriture_leve:
             raise RuntimeError("Snowflake indisponible")
-        return {"lignes_affectees": 51, "lignes_avant": 351, "lignes_apres": 351}
+        avant = self.lignes_en_base
+        # Une correction touche des lignes : on le simule pour que « rien n'a
+        # bougé » soit une observation et non une hypothèse.
+        self.lignes_en_base = avant
+        return {"lignes_affectees": 51, "lignes_avant": avant, "lignes_apres": avant}
+
+    def compter(self) -> int:
+        """Ce que compterait un `SELECT COUNT(*)` — pour les preuves par comptage."""
+        return self.lignes_en_base
 
 
 REFERENCES = ReferencesFactices()
