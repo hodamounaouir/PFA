@@ -77,6 +77,13 @@ METRIQUES_COLONNE = (
     "numeric_rate",
     "numeric_min",
     "numeric_max",
+    # Fraîcheur (4.1.4). Les ranger ici suffit à les rendre **détectables** :
+    # la famille statistique compare toute métrique numérique à son historique,
+    # donc un `dates_futures` constant à 0 qui passe à 1 déclenche une
+    # `rupture_de_constante` sans qu'aucun détecteur ait été écrit pour lui.
+    "retard_jours",
+    "amplitude_jours",
+    "dates_futures",
 )
 
 

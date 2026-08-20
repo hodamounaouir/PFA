@@ -498,6 +498,38 @@ class ConnecteurSnowflake:
 
     # --- interne -----------------------------------------------------------
 
+    def executer(self, sql: str, limite: int) -> dict:
+        """Exécute une requête **déjà validée comme lecture seule** (4.1.6).
+
+        ⚠️ **Cette méthode ne valide rien.** Elle exécute ce qu'on lui donne, et
+        c'est assumé : mêler le contrôle et l'exécution donnerait deux endroits
+        où la règle vit à moitié. Le garde-fou est dans `agent/sql_guard.py`, et
+        c'est `agent/tools/run_sql.py` qui refuse d'appeler ici sans l'avoir
+        passé — un test le prouve.
+
+        Elle n'appartient **pas** au contrat des connecteurs : un connecteur en
+        mémoire n'a pas de SQL à exécuter, et l'exiger de tous obligerait chacun
+        à écrire une méthode qui lève. Même raisonnement que pour `close()`.
+
+        `limite` est appliquée **côté Python** et non ajoutée à la requête :
+        gluer un `LIMIT` sur du SQL qu'on n'a pas analysé casserait une requête
+        qui en porte déjà un, ou pire, une union. On lit ce qui vient et on
+        s'arrête — le coût est le même pour la base, la sécurité est réelle
+        pour l'appelant.
+        """
+        curseur = self._curseur()
+        curseur.execute(sql)
+        colonnes = [d[0] for d in (curseur.description or [])]
+
+        lignes, tronque = [], False
+        for ligne in curseur:
+            if len(lignes) >= limite:
+                tronque = True
+                break
+            lignes.append(dict(zip(colonnes, ligne)))
+
+        return {"columns": colonnes, "rows": lignes, "truncated": tronque}
+
     def _filtre_de_lot(
         self,
         table: str,

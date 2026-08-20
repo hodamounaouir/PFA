@@ -20,6 +20,7 @@ from agent.tools.profile_table import profile_table
 from agent.tools.read_past_incidents import read_past_incidents
 from agent.tools.read_schema_history import read_schema_history
 from agent.tools.robust_stats import robust_stats
+from agent.tools.run_sql import run_sql
 from agent.tools.top_values import top_values
 from agent.tools.write_log import write_log
 
@@ -29,6 +30,7 @@ __all__ = [
     "read_past_incidents",
     "read_schema_history",
     "robust_stats",
+    "run_sql",
     "top_values",
     "write_log",
 ]

@@ -82,3 +82,80 @@ def controler(sql: Optional[str], table: str) -> list[str]:
         alertes.append(f"table étrangère au diagnostic : {nom} (attendu {table})")
 
     return alertes
+
+
+# ---------------------------------------------------------------------------
+# Lecture seule (phase 4.1.6)
+# ---------------------------------------------------------------------------
+#
+# `controler()` ci-dessus juge une correction *proposée* : elle a le droit
+# d'écrire, on vérifie seulement qu'elle n'écrit pas n'importe où. `lecture_seule()`
+# répond à une autre question — cette requête peut-elle modifier quoi que ce
+# soit ? — et sa réponse doit être « non » sans la moindre nuance.
+
+# Les verbes qui ont le droit d'ouvrir une requête. **Une liste blanche, et pas
+# seulement une liste noire de mots interdits.** Une liste noire ne protège que
+# de ce qu'on a pensé à y mettre : un `COPY INTO`, un `PUT`, un `CALL` vers une
+# procédure, une syntaxe ajoutée par une version future du moteur — tout ce qui
+# n'y figure pas passe. Une liste blanche inverse la charge : ce qui n'est pas
+# explicitement autorisé est refusé, y compris ce qui n'existe pas encore.
+VERBES_DE_LECTURE = ("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN")
+
+# Et la liste noire **en plus**, pour ce qui se cache après un verbe autorisé.
+# `SELECT 1; DROP TABLE x` commence bien par SELECT.
+MOTS_CLES_D_ECRITURE = (
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "MERGE",
+    "CREATE",
+    "DROP",
+    "ALTER",
+    "TRUNCATE",
+    "GRANT",
+    "REVOKE",
+    "COPY",
+    "PUT",
+    "REMOVE",
+    "CALL",
+    "EXECUTE",
+    "UNDROP",
+    "USE",
+)
+
+
+def lecture_seule(sql: Optional[str]) -> list[str]:
+    """Ce qui empêche cette requête d'être en lecture seule. Vide = elle l'est.
+
+    Trois barrières, et la troisième est celle qu'on oublie :
+
+    1. le premier verbe doit être un verbe de lecture (liste blanche) ;
+    2. aucun mot-clé d'écriture nulle part (liste noire, en plus de la blanche) ;
+    3. **une seule instruction** — `SELECT 1; DROP TABLE x` franchit les deux
+       premières sans peine. Un point-virgule final est toléré : c'est une
+       habitude d'écriture, pas une seconde instruction.
+    """
+    if not sql or not isinstance(sql, str):
+        return ["requête vide"]
+
+    normalise = _normaliser(sql).rstrip(";").strip()
+    if not normalise:
+        return ["requête vide"]
+
+    refus = []
+
+    premier = normalise.split(None, 1)[0].lstrip("(")
+    if premier not in VERBES_DE_LECTURE:
+        refus.append(
+            f"une requête de lecture commence par {' ou '.join(VERBES_DE_LECTURE)} — "
+            f"reçu {premier}"
+        )
+
+    for mot in MOTS_CLES_D_ECRITURE:
+        if re.search(rf"\b{re.escape(mot)}\b", normalise):
+            refus.append(f"mot-clé d'écriture : {mot}")
+
+    if ";" in normalise:
+        refus.append("plusieurs instructions : une requête, une seule")
+
+    return refus

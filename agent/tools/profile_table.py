@@ -49,7 +49,8 @@ from typing import Optional
 
 from langchain_core.tools import tool
 
-from agent.characterize import CATEGORIEL, NUMERIQUE, classer
+from agent.characterize import CATEGORIEL, NUMERIQUE, TEMPOREL, classer
+from agent.freshness import fraicheur
 from agent.tools._connecteur import connecteur_pour
 from agent.tools.top_values import CARDINALITE_ENUMERABLE_MAX, TOP_K_DEFAUT
 
@@ -119,6 +120,14 @@ def _assembler(connecteur, table: str, batch_column, batch_id) -> Optional[dict]
         # recalculer ailleurs, c'est risquer de le recalculer autrement.
         role = classer(stats, lignes)
         stats["role"] = role
+
+        # La fraîcheur (4.1.4) : **aucune requête**. Le critère de 4.1.5 avait
+        # déjà tranché qu'une colonne temporelle ne reçoit pas de mesure dédiée
+        # parce que ses `min`/`max` *sont* la fraîcheur — il ne manquait que
+        # l'interprétation. Elle est donc gratuite, contrairement au top-K et
+        # aux statistiques robustes qui coûtent une requête par colonne.
+        if role == TEMPOREL:
+            stats.update(fraicheur(stats, batch_id))
 
         voulue = MESURE_PAR_ROLE.get(role)
         obtenue = None

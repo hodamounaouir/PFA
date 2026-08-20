@@ -57,6 +57,9 @@ DAMA_PAR_METRIQUE = {
     "distinct": "unicite",
     "coverage": "coherence",
     "numeric_rate": "validite",
+    "retard_jours": "fraicheur",
+    "amplitude_jours": "fraicheur",
+    "dates_futures": "fraicheur",
 }
 
 
