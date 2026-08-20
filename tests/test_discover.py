@@ -197,7 +197,9 @@ def test_valider_relit_le_fichier_et_conserve_les_corrections(branche, tmp_path)
     discover.approuver("jouet", "RAW.ORDERS", par="hoda", dossier=tmp_path)
 
     applique = charger("jouet", "RAW.ORDERS", dossier=tmp_path)
-    assert applique["columns"]["ORDER_ID"]["max_length"] == 32, "la correction a survécu"
+    assert applique["columns"]["ORDER_ID"]["max_length"] == 32, (
+        "la correction a survécu"
+    )
 
 
 def test_valider_un_contrat_critique_exige_de_le_dire(branche, tmp_path):
@@ -279,9 +281,7 @@ def test_valider_une_table_sans_contrat_est_refuse(tmp_path):
 def test_approuver_sans_signataire_est_refuse(monkeypatch, capsys):
     """Un contrat sans signataire ne prouve rien six mois plus tard — c'est la
     même traçabilité que `decided_by` dans le cycle de surveillance."""
-    monkeypatch.setattr(
-        "sys.argv", ["discover", "jouet", "--approve", "RAW.ORDERS"]
-    )
+    monkeypatch.setattr("sys.argv", ["discover", "jouet", "--approve", "RAW.ORDERS"])
     assert discover.main() == 1
     assert "--by" in capsys.readouterr().out
 

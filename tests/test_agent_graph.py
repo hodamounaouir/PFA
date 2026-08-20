@@ -91,6 +91,10 @@ def etat(schema, **surcharges):
     state["schema_history"] = schema
     # Depuis 4.3, la forme du lot se pilote là où la mesure a lieu.
     PROFIL_FACTICE.colonnes = [c["name"] for c in schema]
+    # Un nouvel état = un nouveau run : le double doit reprendre à sa première
+    # mesure, sinon `validate` de l'appel précédent aurait déjà « guéri » la
+    # table pour celui-ci.
+    PROFIL_FACTICE.deja_profiles.clear()
     state.update(surcharges)
 
     # `profile` charge lui-même les références et **écrase** ce que l'appelant
@@ -98,11 +102,20 @@ def etat(schema, **surcharges):
     # Une surcharge de version se traduit donc en contrat signé côté double —
     # la version vient désormais d'où elle vient vraiment.
     if surcharges.get("contract_version"):
+        # ⚠️ La version est un **entier** : c'est le format du fichier (4.2.4),
+        # et `charger()` le rend tel quel. Les `"v1"` des tests de la phase 3
+        # dataient du stub, quand rien ne relisait un vrai contrat.
+        #
+        # La clause porte sur la colonne où le double pose sa collision : sans
+        # clause violée, `amend` n'aurait **rien à relâcher** et ne produirait
+        # pas de v2 — un amendement qui n'amende rien n'en est pas un.
+        colonne = schema[1]["name"] if len(schema) > 1 else schema[0]["name"]
         REFERENCES.contrat = {
             "table": state["table"],
             "version": surcharges["contract_version"],
             "status": "approved",
-            "columns": {},
+            "columns": {colonne: {"no_semantic_collisions": True}},
+            "warnings": [],
         }
     return state
 
@@ -177,7 +190,7 @@ def test_chemin_refuse():
 
 
 def test_chemin_amende():
-    resultat = lancer(SCHEMA_AVEC_ECART, reponse=DECISION_AMEND, contract_version="v1")
+    resultat = lancer(SCHEMA_AVEC_ECART, reponse=DECISION_AMEND, contract_version=1)
     assert parcours(resultat) == [
         "profile",
         "detect",
@@ -187,7 +200,7 @@ def test_chemin_amende():
         "log",
     ]
     # le contrat bouge, les données non — c'est toute la différence avec `apply`
-    assert resultat["contract_version"] == "v2"
+    assert resultat["contract_version"] == 2
     assert resultat["applied_fix"] is None
     assert resultat["validation"] is None
 
@@ -331,7 +344,7 @@ def test_p3_amend_natteint_jamais_apply_a_lexecution(monkeypatch):
             atteintes.append(state) or {"logs": [log_entry("apply", "espion")]}
         ),
     )
-    resultat = lancer(SCHEMA_AVEC_ECART, reponse=DECISION_AMEND, contract_version="v1")
+    resultat = lancer(SCHEMA_AVEC_ECART, reponse=DECISION_AMEND, contract_version=1)
     assert atteintes == []
     assert "amend" in parcours(resultat)
 
@@ -492,12 +505,12 @@ def test_discuter_nécrit_rien():
     """Dix questions ne modifient ni les données, ni le contrat, ni la validation."""
     with agent_persistant(":memory:") as app:
         config = thread("t")
-        app.invoke(etat(SCHEMA_AVEC_ECART, contract_version="v1"), config)
+        app.invoke(etat(SCHEMA_AVEC_ECART, contract_version=1), config)
         resultat = dialoguer(app, config, "Q1 ?", "Q2 ?", "Q3 ?")
 
     assert resultat["applied_fix"] is None
     assert resultat["validation"] is None
-    assert resultat["contract_version"] == "v1"
+    assert resultat["contract_version"] == 1
 
 
 def test_p3_tient_apres_une_longue_discussion(monkeypatch):
@@ -631,14 +644,12 @@ def test_un_graphe_en_pause_nécrit_rien():
     """Tant que l'humain n'a pas répondu, aucune donnée n'a bougé — ni correction,
     ni contrat, ni validation."""
     with agent_persistant(":memory:") as app:
-        resultat = app.invoke(
-            etat(SCHEMA_AVEC_ECART, contract_version="v1"), thread("t")
-        )
+        resultat = app.invoke(etat(SCHEMA_AVEC_ECART, contract_version=1), thread("t"))
 
     assert resultat["human_decision"] is None
     assert resultat["applied_fix"] is None
     assert resultat["validation"] is None
-    assert resultat["contract_version"] == "v1"
+    assert resultat["contract_version"] == 1
 
 
 def test_deux_runs_simultanes_ne_se_melangent_pas():
@@ -673,27 +684,6 @@ LANCEUR = """
 import sys
 sys.path.insert(0, {tests!r})
 
-import importlib
-
-from conftest import MEMOIRE_FACTICE, PROFIL_FACTICE, REFERENCES
-
-# `import agent.nodes.profile` rendrait la **fonction** réexportée, pas le
-# module — le piège déjà documenté dans conftest.py et test_tools.py. Ici il se
-# manifeste par un `AttributeError` franc ; ailleurs il a rendu des monkeypatch
-# silencieusement sans effet. Troisième occurrence : la réexportation coûte.
-profile_mod = importlib.import_module("agent.nodes.profile")
-
-profile_mod.profile_table = PROFIL_FACTICE
-profile_mod.ops.MemoireOps = lambda *a, **k: MEMOIRE_FACTICE
-# Les fixtures `autouse` ne franchissent pas la frontière du process : les
-# doubles des références (4.3) doivent être réinstallés ici, sinon le run
-# ouvrirait une vraie connexion — et le test de survie à la mort du process
-# mesurerait le réseau au lieu de la reprise.
-profile_mod.charger_registre = lambda dataset: REFERENCES
-profile_mod.ouvrir = lambda nom: REFERENCES
-profile_mod.fermer = lambda connecteur: None
-profile_mod.loader.charger = lambda ds, t: REFERENCES.contrat
-
 from agent.graph import agent_persistant, thread, proposition_en_attente
 from agent.state import new_state
 
@@ -704,6 +694,12 @@ with agent_persistant({db!r}) as app:
 """
 
 DOSSIER_TESTS = str(Path(__file__).resolve().parent)
+
+# Le dossier des tests sur le chemin d'un sous-processus suffit à y installer
+# tous les doubles : Python importe `sitecustomize` au démarrage, avant tout le
+# reste (cf. tests/sitecustomize.py). Les fixtures `autouse`, elles, ne
+# franchissent pas la frontière d'un `subprocess`.
+ENV_PYTHONPATH = os.pathsep.join([str(RACINE), DOSSIER_TESTS])
 
 
 def test_la_pause_survit_a_la_mort_du_process(tmp_path):
@@ -721,7 +717,7 @@ def test_la_pause_survit_a_la_mort_du_process(tmp_path):
     lancement = subprocess.run(
         [sys.executable, "-c", LANCEUR.format(db=str(db), tests=DOSSIER_TESTS)],
         cwd=RACINE,
-        env={**os.environ, "PYTHONPATH": str(RACINE)},
+        env={**os.environ, "PYTHONPATH": ENV_PYTHONPATH},
         capture_output=True,
         text=True,
     )
@@ -761,7 +757,7 @@ def test_le_script_decide_reprend_un_run_lance_ailleurs(tmp_path):
     subprocess.run(
         [sys.executable, "-c", LANCEUR.format(db=str(db), tests=DOSSIER_TESTS)],
         cwd=RACINE,
-        env={**os.environ, "PYTHONPATH": str(RACINE)},
+        env={**os.environ, "PYTHONPATH": ENV_PYTHONPATH},
         check=True,
         capture_output=True,
     )
@@ -770,7 +766,7 @@ def test_le_script_decide_reprend_un_run_lance_ailleurs(tmp_path):
         [sys.executable, "-m", "scripts.decide", "survivant", "approve", "--by", "hoda"]
         + ["--db", str(db)],
         cwd=RACINE,
-        env={**os.environ, "PYTHONPATH": str(RACINE)},
+        env={**os.environ, "PYTHONPATH": ENV_PYTHONPATH},
         capture_output=True,
         text=True,
     )
@@ -789,7 +785,7 @@ def test_decide_refuse_un_thread_inconnu(tmp_path):
         [sys.executable, "-m", "scripts.decide", "inexistant", "approve"]
         + ["--db", str(tmp_path / "vide.sqlite")],
         cwd=RACINE,
-        env={**os.environ, "PYTHONPATH": str(RACINE)},
+        env={**os.environ, "PYTHONPATH": ENV_PYTHONPATH},
         capture_output=True,
         text=True,
     )
@@ -804,7 +800,7 @@ def test_decide_refuse_une_correction_reecrite_sans_approbation(tmp_path):
     subprocess.run(
         [sys.executable, "-c", LANCEUR.format(db=str(db), tests=DOSSIER_TESTS)],
         cwd=RACINE,
-        env={**os.environ, "PYTHONPATH": str(RACINE)},
+        env={**os.environ, "PYTHONPATH": ENV_PYTHONPATH},
         check=True,
         capture_output=True,
     )
@@ -813,7 +809,7 @@ def test_decide_refuse_une_correction_reecrite_sans_approbation(tmp_path):
         [sys.executable, "-m", "scripts.decide", "survivant", "reject"]
         + ["--fix", "UPDATE …", "--db", str(db)],
         cwd=RACINE,
-        env={**os.environ, "PYTHONPATH": str(RACINE)},
+        env={**os.environ, "PYTHONPATH": ENV_PYTHONPATH},
         capture_output=True,
         text=True,
     )

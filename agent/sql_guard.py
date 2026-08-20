@@ -55,7 +55,44 @@ def _normaliser(sql: str) -> str:
     return " ".join(sql.upper().split())
 
 
-def controler(sql: Optional[str], table: str) -> list[str]:
+# Un renommage de table, de B vers A — la **seule** forme de DDL qu'`apply` puisse
+# exécuter (ADR 010, décision 14). On capture les deux noms pour les vérifier :
+# une exception qu'on ne vérifie pas n'est pas une exception, c'est un trou.
+RENOMMAGE = re.compile(
+    r"^ALTER\s+TABLE\s+(?P<source>[\w$.]+)\s+RENAME\s+TO\s+(?P<cible>[\w$.]+)$",
+    re.IGNORECASE,
+)
+
+
+def renommage_vers(sql: Optional[str], table: str) -> Optional[str]:
+    """La table renommée **vers** `table` par ce SQL, ou `None`.
+
+    ⭐ C'est la seule écriture de l'agent qui modifie un **schéma** et non un
+    contenu, et elle n'est légitime que dans un cas : restaurer un nom qu'un
+    renommage accidentel a fait disparaître (décision 14).
+
+    La vérification porte sur la **cible** : elle doit être exactement la table
+    déclarée au registre. C'est ce qui fait tenir P6 par construction — le nom
+    restauré est **lu** dans le registre, jamais deviné. C'est l'inverse du cas
+    « 8000 dans [1–100] », où aucune source ne dit ce que la valeur aurait dû
+    être ; ici la source existe.
+    """
+    trouve = RENOMMAGE.match(_normaliser(sql or ""))
+    if not trouve:
+        return None
+    cible = trouve.group("cible").upper()
+    # La cible peut être écrite sans schéma (`ORDERS` pour `RAW.ORDERS`) : c'est
+    # la forme que le moteur accepte, et la refuser obligerait le modèle à
+    # deviner une syntaxe plutôt qu'à écrire la plus naturelle.
+    attendue = table.upper()
+    if cible not in (attendue, attendue.rsplit(".", 1)[-1]):
+        return None
+    return trouve.group("source").upper()
+
+
+def controler(
+    sql: Optional[str], table: str, renommage_autorise: bool = False
+) -> list[str]:
     """Ce qui cloche dans ce SQL, en clair. Liste vide = rien à signaler.
 
     Des phrases et non des codes : elles finissent sous les yeux de l'humain qui
@@ -66,6 +103,14 @@ def controler(sql: Optional[str], table: str) -> list[str]:
         return []
 
     normalise = _normaliser(sql)
+
+    # L'unique exception DDL (décision 14), et elle est **étroite** : la forme
+    # exacte, et la cible doit être la table déclarée. Tout le reste — un autre
+    # DDL de colonne, un renommage vers un autre nom — retombe dans
+    # le cas général et se fait refuser.
+    if renommage_autorise and renommage_vers(sql, table) is not None:
+        return []
+
     alertes = []
 
     for mot in MOTS_CLES_DESTRUCTEURS:

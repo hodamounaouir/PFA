@@ -83,7 +83,8 @@ def test_la_fenetre_de_reference_ne_porte_aucune_anomalie():
     coupables = [
         (a["id"], a["day"])
         for a in spread_anomalies()
-        if (date.fromisoformat(str(a["date"])) - debut).days + 1 <= config.REFERENCE_END_DAY
+        if (date.fromisoformat(str(a["date"])) - debut).days + 1
+        <= config.REFERENCE_END_DAY
     ]
     assert not coupables, (
         f"anomalie(s) dans la fenêtre de référence J1→J{config.REFERENCE_END_DAY} : "

@@ -18,18 +18,9 @@ diff de clause. Un test prouvera qu'aucune ligne de données n'a bougé (comptag
 avant/après inchangé).
 """
 
+from agent.contracts.amend import relacher, version_suivante
+from agent.contracts.loader import ecrire
 from agent.state import DECISION_AMEND, AgentState, log_entry
-
-
-def _version_suivante(actuelle: str | None) -> str:
-    """`v1` → `v2`, et `None` → `v1` si la table n'avait pas encore de contrat."""
-    if not actuelle:
-        return "v1"
-    try:
-        return f"v{int(actuelle.lstrip('v')) + 1}"
-    except ValueError:
-        # version non numérotée : on ne devine pas, on repart proprement
-        return "v1"
 
 
 def amend(state: AgentState) -> dict:
@@ -42,19 +33,58 @@ def amend(state: AgentState) -> dict:
             f"(human_decision={state['human_decision']!r})"
         )
 
-    depuis = state["contract_version"]
-    vers = _version_suivante(depuis)
+    contrat = state["contract"] or {}
+    if not contrat.get("columns"):
+        # Amender ce qui n'existe pas n'aurait pas de sens : sans contrat signé,
+        # l'écart ne vient pas d'une clause. On le dit plutôt que d'écrire un
+        # fichier vide qui gouvernerait ensuite la surveillance.
+        return {
+            "logs": [
+                log_entry(
+                    "amend",
+                    "aucun contrat validé à amender",
+                    table=state["table"],
+                    decideur=state["decided_by"],
+                )
+            ]
+        }
+
+    depuis = contrat.get("version")
+    nouveau = version_suivante(contrat, state["decided_by"])
+    diffs = relacher(nouveau, state["anomalies"])
+
+    if not diffs:
+        # Aucune clause n'a bougé : écrire une v2 identique à la v1 encombrerait
+        # l'historique d'une version qui ne dit rien. Un amendement qui
+        # n'amende rien n'est pas un amendement.
+        return {
+            "logs": [
+                log_entry(
+                    "amend",
+                    "aucune clause à relâcher — contrat inchangé",
+                    table=state["table"],
+                    version=depuis,
+                    decideur=state["decided_by"],
+                )
+            ]
+        }
+
+    chemin = ecrire(nouveau, state["dataset"])
+
     return {
         # aucune clé de données n'est retournée : ni profile, ni anomalies,
         # ni validation. C'est ce qui distingue `amend` d'`apply`.
-        "contract_version": vers,
+        "contract": nouveau,
+        "contract_version": nouveau["version"],
         "logs": [
             log_entry(
                 "amend",
-                "contrat amendé (stub, aucune écriture sur les données)",
+                "contrat amendé — aucune écriture sur les données",
                 table=state["table"],
                 depuis=depuis,
-                vers=vers,
+                vers=nouveau["version"],
+                fichier=str(chemin),
+                diff=diffs,
                 decideur=state["decided_by"],
             )
         ],

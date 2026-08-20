@@ -39,7 +39,9 @@ def _sans_accent(colonne: pd.Series) -> pd.Series:
 
 @pytest.fixture(scope="module")
 def villes_source() -> pd.Series:
-    return pd.read_csv(GEOLOCATION_CSV, usecols=["geolocation_city"])["geolocation_city"]
+    return pd.read_csv(GEOLOCATION_CSV, usecols=["geolocation_city"])[
+        "geolocation_city"
+    ]
 
 
 @pytest.fixture(scope="module")
@@ -156,7 +158,11 @@ def test_le_rejeu_applique_vraiment_la_preparation(tmp_path, monkeypatch):
         {
             "geolocation_zip_code_prefix": ["01", "02", "03", "04", "05"],
             "geolocation_city": [
-                "São PAULO", "sao  paulo", "sa£o paulo", "maceia³", "´teresopolis",
+                "São PAULO",
+                "sao  paulo",
+                "sa£o paulo",
+                "maceia³",
+                "´teresopolis",
             ],
         }
     )
@@ -269,4 +275,6 @@ def test_les_variantes_declarees_sont_de_vraies_variantes(derive):
     """
     for brut, accentuee in derive["params"]["variants"].items():
         assert brut != accentuee, f"{brut!r} n'a pas de forme accentuée distincte"
-        assert normaliser(accentuee) == brut, f"{accentuee!r} ne se replie pas sur {brut!r}"
+        assert normaliser(accentuee) == brut, (
+            f"{accentuee!r} ne se replie pas sur {brut!r}"
+        )

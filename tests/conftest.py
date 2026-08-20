@@ -17,6 +17,7 @@ enregistre ce qu'il reçoit) redéfinissent simplement la même couture ; leur
 """
 
 import importlib
+from contextlib import contextmanager
 
 import pytest
 
@@ -28,6 +29,9 @@ from agent.llm import Diagnostic
 # rien — silencieusement, en laissant partir de vrais appels réseau.
 diagnose_mod = importlib.import_module("agent.nodes.diagnose")
 profile_mod = importlib.import_module("agent.nodes.profile")
+apply_mod = importlib.import_module("agent.nodes.apply")
+amend_mod = importlib.import_module("agent.nodes.amend")
+validate_mod = importlib.import_module("agent.nodes.validate")
 
 DIAGNOSTIC_FACTICE = Diagnostic(
     root_cause="(diagnostic factice — aucun LLM appelé en test)",
@@ -109,23 +113,39 @@ class ProfilFactice:
         self.colonnes = list(self.COLONNES_PAR_DEFAUT)
         self.row_count = self.LIGNES
         self.absente = False  # simule une table déclarée mais disparue
+        # ⭐ Depuis 5.3, `validate` **re-profile** pour vérifier que l'écart a
+        # disparu. Le double doit donc pouvoir jouer les deux moments : la
+        # mesure d'avant (anormale) et celle d'après (saine).
+        #
+        # Le 1ᵉʳ appel est celui de `profile`, le 2ᵉ celui de `validate` : par
+        # défaut le double **guérit**, c'est-à-dire simule une correction qui a
+        # marché. Un test qui veut l'échec pose `guerit = False`, et il le dit
+        # ainsi explicitement au lieu de le subir.
+        self.guerit = True
         self.appels = []
+        self.deja_profiles = set()  # (table, lot) déjà mesurés une fois
 
     def invoke(self, arguments: dict):
         self.appels.append(arguments)
         if self.absente:
             return None
+        # La clé est **(table, lot)** et non un compteur global : dans un run,
+        # `profile` puis `validate` mesurent la même table ; dans un balayage de
+        # couche, deux tables différentes sont chacune à leur premier passage.
+        cle = (arguments["table"], arguments.get("batch_id"))
+        premiere = cle not in self.deja_profiles
+        self.deja_profiles.add(cle)
         return {
             "table": arguments["table"],
             "batch_id": arguments.get("batch_id"),
             "row_count": self.row_count,
             "columns": {
-                nom: self._colonne(position)
+                nom: self._colonne(position, anormale=premiere or not self.guerit)
                 for position, nom in enumerate(self.colonnes)
             },
         }
 
-    def _colonne(self, position: int) -> dict:
+    def _colonne(self, position: int, anormale: bool = True) -> dict:
         """Les agrégats d'une colonne, calculés sur sa **position**.
 
         Sur la position et jamais sur le nom : c'est ce qui garantit que le
@@ -140,7 +160,7 @@ class ProfilFactice:
         Un taux de nulls n'aurait plus suffi — seul le contrat ou l'historique
         savent qu'il est anormal.
         """
-        anormale = position % 4 == 1
+        anormale = anormale and position % 4 == 1
         stats = {
             "null_rate": 0.301 if anormale else 0.0,
             "null_count": int(self.row_count * (0.301 if anormale else 0.0)),
@@ -258,6 +278,9 @@ class ReferencesFactices:
         self.presentes = ["UNE.TABLE", "RAW.ORDERS"]
         self.schemas = {}  # {table: [colonnes]}
         self.schema_connu = []  # ce que `_SCHEMA_HISTORY` rendrait
+        self.corrections = []  # ce qu'`apply` a exécuté (5.3)
+        self.contrats_ecrits = []  # ce qu'`amend` a écrit (5.3)
+        self.ecriture_leve = False
 
     # -- vu comme un registre
     @property
@@ -271,6 +294,19 @@ class ReferencesFactices:
     def get_schema(self, table):
         colonnes = self.schemas.get(table)
         return None if colonnes is None else [{"name": c} for c in colonnes]
+
+    # -- vu comme la cible d'une correction (5.3)
+    batch_column = "_batch_id"
+
+    def ecrire_contrat(self, contrat, dataset, dossier=None):
+        self.contrats_ecrits.append(contrat)
+        return f"/tmp/{dataset}/{contrat['table']}.v{contrat['version']}.yaml"
+
+    def appliquer(self, sql, table, batch_column=None, batch_id=None):
+        self.corrections.append((sql, table, batch_id))
+        if self.ecriture_leve:
+            raise RuntimeError("Snowflake indisponible")
+        return {"lignes_affectees": 51, "lignes_avant": 351, "lignes_apres": 351}
 
 
 REFERENCES = ReferencesFactices()
@@ -289,6 +325,25 @@ def pas_de_vraie_base(monkeypatch):
     monkeypatch.setattr(profile_mod, "ouvrir", lambda nom: REFERENCES)
     monkeypatch.setattr(profile_mod, "fermer", lambda connecteur: None)
     monkeypatch.setattr(profile_mod.loader, "charger", lambda ds, t: REFERENCES.contrat)
+
+    # `apply` écrit vraiment depuis 5.3 : même double par défaut, même raison —
+    # aucun test ne doit toucher une base, et surtout pas en écriture.
+    @contextmanager
+    def _connecteur_factice(dataset, table):
+        yield REFERENCES, REFERENCES
+
+    monkeypatch.setattr(apply_mod, "connecteur_pour", _connecteur_factice)
+
+    # `amend` écrit un contrat v2 sur disque depuis 5.3 : sans double, la suite
+    # sèmerait des fichiers dans `contracts/` du dépôt.
+    REFERENCES.contrats_ecrits.clear()
+    monkeypatch.setattr(amend_mod, "ecrire", REFERENCES.ecrire_contrat)
+
+    # `validate` re-profile depuis 5.3 : il importe **sa propre** référence au
+    # tool, donc patcher celle de `profile` ne suffit pas. C'est le piège de la
+    # réexportation sous une autre forme — un `monkeypatch` qui vise le mauvais
+    # objet ne remplace rien, silencieusement.
+    monkeypatch.setattr(validate_mod, "profile_table", PROFIL_FACTICE)
     MEMOIRE_FACTICE.schema_connu = REFERENCES.schema_connu
 
 

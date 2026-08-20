@@ -498,6 +498,70 @@ class ConnecteurSnowflake:
 
     # --- interne -----------------------------------------------------------
 
+    def appliquer(
+        self,
+        sql: str,
+        table: str,
+        batch_column: Optional[str] = None,
+        batch_id: Optional[str] = None,
+    ) -> dict:
+        """Exécute une correction **dans une transaction** (phase 5.3).
+
+        ⚠️ **Ne valide rien** — comme `executer()`, et pour la même raison :
+        mêler le contrôle et l'écriture donnerait deux endroits où la règle vit
+        à moitié. Les garde-fous sont dans `agent/sql_guard.py` et
+        `agent/corrections.py`, et c'est `agent/nodes/apply.py` qui refuse
+        d'appeler ici sans les avoir passés.
+
+        `BEGIN` explicite plutôt qu'`autocommit(False)` : chez Snowflake un
+        `BEGIN` ouvre une transaction même quand l'autocommit est actif, donc la
+        garantie ne dépend pas d'un réglage de session qu'un autre appelant
+        pourrait avoir changé. **Si quoi que ce soit lève, on annule** — une
+        correction à moitié appliquée serait pire que pas de correction du tout,
+        parce qu'elle serait cohérente en apparence.
+
+        Rend `{lignes_affectees, lignes_avant, lignes_apres}`. Les deux
+        dernières comptent le **lot**, pas la table : c'est ce qui permet de
+        montrer qu'un `UPDATE` n'a rien créé ni supprimé, alors qu'un total de
+        table ne le dirait pas sur une table qui grossit chaque jour.
+        """
+        curseur = self._curseur()
+        avant = self._compter(curseur, table, batch_column, batch_id)
+
+        curseur.execute("BEGIN")
+        try:
+            curseur.execute(sql)
+            affectees = curseur.rowcount
+            apres = self._compter(curseur, table, batch_column, batch_id)
+            curseur.execute("COMMIT")
+        except Exception:
+            curseur.execute("ROLLBACK")
+            raise
+
+        return {
+            "lignes_affectees": affectees,
+            "lignes_avant": avant,
+            "lignes_apres": apres,
+        }
+
+    def _compter(self, curseur, table, batch_column, batch_id) -> Optional[int]:
+        """Combien de lignes le lot porte, ou `None` si on ne peut pas le dire.
+
+        Un comptage qui échoue ne doit pas empêcher la correction : il sert au
+        journal, pas à la décision. Rendre `None` dit « on ne sait pas », ce qui
+        est exact — un zéro serait un mensonge.
+        """
+        schema, nom = _decouper(table)
+        colonnes = [c["name"] for c in (self.get_schema(table) or [])]
+        filtre, parametres = self._filtre_de_lot(
+            table, colonnes, batch_column, batch_id
+        )
+        try:
+            curseur.execute(f"SELECT COUNT(*) FROM {schema}.{nom}{filtre}", parametres)
+            return int(curseur.fetchone()[0])
+        except Exception:  # noqa: BLE001 — voir le docstring
+            return None
+
     def executer(self, sql: str, limite: int) -> dict:
         """Exécute une requête **déjà validée comme lecture seule** (4.1.6).
 

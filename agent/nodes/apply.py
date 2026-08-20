@@ -31,6 +31,8 @@ une transaction : si une vérification saute en cours de route, rien n'est écri
 """
 
 from agent.corrections import controler
+from agent.sql_guard import controler as controler_sql
+from agent.tools._connecteur import connecteur_pour
 from agent.state import DECISION_APPROVED, AgentState, log_entry
 
 
@@ -69,31 +71,88 @@ def apply(state: AgentState) -> dict:
         # — le modèle a proposé quelque chose d'inacceptable. Le run doit se
         # terminer normalement par `log`, sinon la trace de ce refus serait
         # perdue au moment précis où elle est la plus instructive.
-        return {
-            "applied_fix": None,
-            "logs": [
-                log_entry(
-                    "apply",
-                    "correction REFUSÉE malgré l'approbation — invariant P6",
-                    table=state["table"],
-                    fix_refuse=fix,
-                    refus=refus,
-                    decideur=state["decided_by"],
-                    recours="réécrivez la correction avec --fix : votre autorité "
-                    "n'est pas soumise à P6, celle de l'agent l'est",
-                )
-            ],
-        }
+        sortie = _refus(
+            state, fix, refus, "correction REFUSÉE malgré l'approbation — invariant P6"
+        )
+        sortie["logs"][0]["recours"] = (
+            "réécrivez la correction avec --fix : votre autorité n'est pas "
+            "soumise à P6, celle de l'agent l'est"
+        )
+        return sortie
+
+    # Les deux garde-fous qui valent pour **tout le monde**, agent comme humain :
+    # ils protègent de l'accident, pas du jugement. Le renommage de table est la
+    # seule exception DDL, et seulement si un écart d'inventaire l'appelle
+    # (décision 14) — une exception qu'aucun fait ne justifie n'en est pas une.
+    bornes = controler_sql(
+        fix, state["table"], renommage_autorise=_renommage_constate(state)
+    )
+    if bornes:
+        return _refus(
+            state, fix, bornes, "correction REFUSÉE — hors des bornes d'apply"
+        )
+
+    if not fix:
+        # Rien à appliquer : le diagnostic n'a rien proposé (LLM en panne), et
+        # l'humain a approuvé un vide. On le dit plutôt que d'écrire `NULL`.
+        return _refus(
+            state,
+            fix,
+            ["aucune correction à appliquer"],
+            "rien à appliquer — approbation sans correction",
+        )
+
+    with connecteur_pour(state["dataset"], state["table"]) as (connecteur, declaree):
+        mesures = connecteur.appliquer(
+            fix, state["table"], declaree.batch_column, state["batch_id"]
+        )
 
     return {
         "applied_fix": fix,
         "logs": [
             log_entry(
                 "apply",
-                "correction appliquée (stub, aucune écriture réelle)",
+                "correction appliquée",
                 table=state["table"],
                 fix=fix,
                 reecrite_par_humain=reecrite,
+                decideur=state["decided_by"],
+                **mesures,
+            )
+        ],
+    }
+
+
+def _renommage_constate(state: AgentState) -> bool:
+    """Un écart d'inventaire réclame-t-il de restaurer un nom de table ?
+
+    L'autorisation DDL ne se donne pas parce que le SQL en a la forme, mais
+    parce qu'un **fait constaté** l'appelle. Sans ça, il suffirait au modèle
+    d'écrire un renommage de table pour franchir un garde-fou qui existe
+    précisément pour l'en empêcher.
+    """
+    return any(
+        a.get("famille") == "inventaire"
+        and a.get("type") in ("renommage_probable", "table_absente")
+        for a in state["anomalies"] or []
+    )
+
+
+def _refus(state: AgentState, fix, motifs: list, message: str) -> dict:
+    """Un refus : rien n'est écrit, tout est journalisé.
+
+    On **ne lève pas** — voir le refus P6 plus haut : `log` est la sortie unique,
+    et une exception ferait perdre la trace au moment où elle instruit le plus.
+    """
+    return {
+        "applied_fix": None,
+        "logs": [
+            log_entry(
+                "apply",
+                message,
+                table=state["table"],
+                fix_refuse=fix,
+                refus=motifs,
                 decideur=state["decided_by"],
             )
         ],

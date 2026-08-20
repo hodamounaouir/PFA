@@ -21,13 +21,12 @@ from pydantic import ValidationError
 
 from agent.llm import CONSIGNES, Diagnostic
 from agent.nodes import amend, apply, detect, diagnose, log, profile, propose, validate
-from agent.nodes.amend import _version_suivante
 from agent.nodes.validate import VALIDATION_OK
 
 # Le double de `profile_table` (cf. conftest.py) : depuis 4.3 c'est lui, et non
 # plus l'état, qui décide des colonnes que la mesure rendra. pytest place le
 # dossier des tests sur `sys.path`, d'où l'import direct du conftest.
-from conftest import MEMOIRE_FACTICE, PROFIL_FACTICE
+from conftest import MEMOIRE_FACTICE, PROFIL_FACTICE, REFERENCES
 from agent.nodes.propose import build_proposal, lire_reponse
 from agent.state import (
     DECISION_AMEND,
@@ -69,6 +68,10 @@ def base_state(schema=None, table="RAW.ORDERS"):
     # fait simplement là où la mesure a lieu.
     if schema:
         PROFIL_FACTICE.colonnes = [c["name"] for c in schema]
+    # Un nouvel état = un nouveau run : le double doit reprendre à sa première
+    # mesure, sinon `validate` de l'appel précédent aurait déjà « guéri » la
+    # table pour celui-ci.
+    PROFIL_FACTICE.deja_profiles.clear()
     return state
 
 
@@ -848,42 +851,123 @@ def test_amend_refuse_toute_execution_sans_decision_d_amendement(decision):
         amend(state)
 
 
-def test_amend_ne_touche_jamais_aux_donnees():
-    """LA différence avec apply : il ne retourne aucune clé de données.
-
-    Ni profile, ni anomalies, ni validation — seulement la version du contrat
-    et le journal. En phase 5.3 un test comptera les lignes avant/après.
-    """
+def etat_amendable(**surcharges):
+    """Un état où une clause du contrat est réellement violée par l'écart."""
     state = etat_diagnostique()
     state["human_decision"] = DECISION_AMEND
-    assert set(amend(state)) == {"contract_version", "logs"}
+    state["anomalies"] = [
+        {
+            "famille": "contrat",
+            "table": "RAW.ORDERS",
+            "colonne": "COL",
+            "type": "nulls_interdits",
+            "observe": 51,
+            "reference": 0,
+            "ampleur": 0.14,
+            "dama": "completude",
+            "details": {},
+        }
+    ]
+    state["contract"] = {
+        "table": "RAW.ORDERS",
+        "version": 1,
+        "status": "approved",
+        "columns": {"COL": {"not_null": True, "role": "categorical"}},
+        "warnings": [],
+    }
+    state.update(surcharges)
+    return state
+
+
+def test_amend_ne_touche_jamais_aux_donnees():
+    """LA différence avec apply : aucune clé de données n'est retournée.
+
+    Ni profile, ni anomalies, ni validation — seulement le contrat et le
+    journal. C'est ce qui distingue « la règle avait tort » de « la donnée
+    avait tort ».
+    """
+    assert set(amend(etat_amendable())) == {"contract", "contract_version", "logs"}
 
 
 def test_amend_incremente_la_version_du_contrat():
-    state = etat_diagnostique()
-    state["human_decision"] = DECISION_AMEND
-    state["contract_version"] = "v1"
-    assert amend(state)["contract_version"] == "v2"
+    """La version est un **entier** : c'est le format du fichier (4.2.4)."""
+    assert amend(etat_amendable())["contract_version"] == 2
 
 
-@pytest.mark.parametrize(
-    ("actuelle", "attendue"),
-    [(None, "v1"), ("v1", "v2"), ("v9", "v10"), ("brouillon", "v1")],
-)
-def test_la_numerotation_des_contrats_est_previsible(actuelle, attendue):
-    """Une table sans contrat démarre en v1 ; une version illisible ne plante pas."""
-    assert _version_suivante(actuelle) == attendue
+def test_amend_relache_la_clause_violee_et_elle_seule():
+    resultat = amend(etat_amendable())
+    clauses = resultat["contract"]["columns"]["COL"]
+    assert "not_null" not in clauses
+    assert clauses["role"] == "categorical", "le reste du contrat n'a pas bougé"
 
 
-def test_amend_trace_le_passage_d_une_version_a_l_autre():
-    state = etat_diagnostique()
-    state["human_decision"] = DECISION_AMEND
-    state["contract_version"] = "v1"
-    state["decided_by"] = "hoda"
+def test_amend_elargit_une_borne_au_lieu_de_la_supprimer():
+    """⭐ Un amendement doit **desserrer** la règle, pas l'abandonner.
 
-    entry = amend(state)["logs"][0]
+    Une borne étendue continue de protéger contre la valeur suivante ; une
+    clause supprimée ne protège plus de rien.
+    """
+    state = etat_amendable()
+    state["anomalies"][0].update(
+        {"type": "hors_bornes", "observe": [1.0, 8000.0], "reference": [1, 100]}
+    )
+    state["contract"]["columns"]["COL"] = {"between": [1, 100]}
+
+    clauses = amend(state)["contract"]["columns"]["COL"]
+    assert clauses["between"] == [1, 8000.0]
+
+
+def test_amend_ajoute_les_valeurs_vues_a_la_liste_close():
+    state = etat_amendable()
+    state["anomalies"][0].update({"type": "valeur_non_admise", "observe": ["pix"]})
+    state["contract"]["columns"]["COL"] = {"accepted_values": ["carte", "boleto"]}
+
+    clauses = amend(state)["contract"]["columns"]["COL"]
+    assert clauses["accepted_values"] == ["boleto", "carte", "pix"]
+
+
+def test_la_v2_est_signee_par_qui_a_decide():
+    """L'amendement **est** la décision humaine — elle vient d'être prise dans
+    `propose`. Laisser la v2 en `proposed` obligerait à re-signer ce qu'on vient
+    de trancher, et l'ancienne règle continuerait de crier entre-temps."""
+    contrat = amend(etat_amendable(decided_by="hoda"))["contract"]
+    assert contrat["status"] == "approved"
+    assert contrat["approved_by"] == "hoda"
+
+
+def test_la_v2_est_ecrite_sur_disque():
+    amend(etat_amendable())
+    assert [c["version"] for c in REFERENCES.contrats_ecrits] == [2]
+
+
+def test_sans_contrat_rien_n_est_ecrit():
+    """Amender ce qui n'existe pas n'a pas de sens : sans contrat signé, l'écart
+    ne vient pas d'une clause. On le dit plutôt que d'écrire un fichier vide qui
+    gouvernerait ensuite la surveillance."""
+    state = etat_amendable(contract={})
+    assert set(amend(state)) == {"logs"}
+    assert REFERENCES.contrats_ecrits == []
+
+
+def test_un_amendement_qui_n_amende_rien_n_ecrit_pas():
+    """Une v2 identique à la v1 encombrerait l'historique d'une version qui ne
+    dit rien."""
+    state = etat_amendable()
+    state["anomalies"][0]["colonne"] = "UNE_AUTRE"
+    assert set(amend(state)) == {"logs"}
+    assert REFERENCES.contrats_ecrits == []
+
+
+def test_amend_trace_le_diff_clause_par_clause():
+    """Un contrat qui évolue sans trace devient au bout de six mois un ensemble
+    de règles que plus personne ne sait justifier — et qu'on n'ose donc plus
+    modifier."""
+    entry = amend(etat_amendable(decided_by="hoda"))["logs"][0]
     assert entry["node"] == "amend"
-    assert (entry["depuis"], entry["vers"]) == ("v1", "v2")
+    assert (entry["depuis"], entry["vers"]) == (1, 2)
+    assert entry["diff"] == [
+        {"colonne": "COL", "clause": "not_null", "avant": True, "apres": None}
+    ]
     assert entry["decideur"] == "hoda"
 
 
@@ -970,12 +1054,10 @@ def test_log_resume_le_chemin_refuse():
 
 
 def test_log_resume_le_chemin_amende():
-    state = etat_diagnostique()
-    state["human_decision"] = DECISION_AMEND
-    state = fusionner(state, amend(state))
+    state = fusionner(etat_amendable(), amend(etat_amendable()))
     entry = log(state)["logs"][-1]
 
-    assert entry["contract_version"] == "v1"
+    assert entry["contract_version"] == 2
     assert entry["applied_fix"] is None  # amend n'écrit jamais dans les données
 
 
