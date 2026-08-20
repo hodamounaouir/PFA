@@ -420,6 +420,63 @@ class MemoireOps:
         )
         return [_decoder(dict(zip(champs, ligne))) for ligne in curseur.fetchall()]
 
+    def lire_journal(
+        self,
+        dataset: str,
+        table: Optional[str] = None,
+        couche: Optional[str] = None,
+        depuis: Optional[str] = None,
+        limite: int = 500,
+    ) -> list[dict]:
+        """Le journal complet — **sans** le filtre R5, contrairement à la mémoire.
+
+        ⭐ La distinction est structurante et vaut d'être dite : `lire_incidents`
+        est la **mémoire de l'agent**, donc filtrée aux décisions humaines (R5) —
+        lui donner à lire ses propres hypothèses le ferait tourner en rond.
+        `lire_journal` est le **journal pour des yeux humains** : un run qui n'a
+        rien trouvé, un run encore sans décision, un run refusé y figurent tous.
+
+        Les cacher donnerait à l'écran d'historique une vue *plus propre que la
+        réalité* — et c'est précisément là qu'on regarde pour savoir ce que
+        l'agent a fait cette nuit.
+        """
+        curseur = self._curseur()
+        self._creer_incidents(curseur)
+
+        conditions, parametres = ["dataset = %s"], [dataset]
+        if table:
+            conditions.append("table_name = %s")
+            parametres.append(table)
+        if couche:
+            conditions.append("layer = %s")
+            parametres.append(couche)
+        if depuis:
+            conditions.append("batch_id >= %s")
+            parametres.append(depuis)
+
+        champs = (
+            "incident_id",
+            "run_ts",
+            "layer",
+            "table_name",
+            "batch_id",
+            "anomalies",
+            "signatures",
+            "diagnosis",
+            "human_decision",
+            "decided_by",
+            "decided_at",
+            "applied_fix",
+            "validation_status",
+        )
+        curseur.execute(
+            f"SELECT {', '.join(champs)} FROM {self.base}.{OPS_SCHEMA}.{INCIDENTS} "
+            f"WHERE {' AND '.join(conditions)} "
+            f"ORDER BY run_ts DESC LIMIT {int(limite)}",
+            tuple(parametres),
+        )
+        return [_decoder(dict(zip(champs, ligne))) for ligne in curseur.fetchall()]
+
 
 def _decoder(ligne: dict) -> dict:
     """Rend les champs JSON sous forme d'objets Python.

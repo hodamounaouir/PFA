@@ -30,20 +30,17 @@ au clavier ce qui est commode, on écrit en base ce qui est explicite.
 import argparse
 import sys
 
-from langgraph.types import Command
-
-from agent.graph import (
-    CHECKPOINT_DB,
-    agent_persistant,
-    proposition_en_attente,
-    propositions_en_attente,
-    thread,
+from agent.graph import CHECKPOINT_DB, propositions_en_attente
+from agent.hitl import (
+    CORRECTION_SANS_APPROBATION,
+    proposition,
+    questionner,
+    trancher,
 )
 from agent.state import (
     DECISION_AMEND,
     DECISION_APPROVED,
     DECISION_REJECTED,
-    DEMANDE_QUESTION,
 )
 
 # Les trois verbes qui **tranchent** — ils terminent le run.
@@ -138,96 +135,67 @@ def main() -> int:
     if not args.thread_id:
         parser.error("thread_id est requis (ou utilisez --list)")
 
-    with agent_persistant(args.db) as app:
-        config = thread(args.thread_id)
+    # ⭐ Toute la reprise passe par `agent/hitl.py` — la **voie unique**, celle
+    # que les boutons Streamlit emprunteront aussi (phase 6). Une seconde voie
+    # serait une seconde façon de contourner P3 : la garantie « aucun chemin
+    # n'atteint `apply` sans approbation » ne vaudrait plus que pour les chemins
+    # qu'on a testés.
+    proposal = proposition(args.thread_id, args.db)
+    if proposal is None:
+        print(f"❌ Aucune proposition en attente pour le thread {args.thread_id!r}")
+        return 1
 
-        etat = app.get_state(config)
-        if not etat.next:
-            print(f"❌ Aucun run en attente pour le thread {args.thread_id!r}")
-            return 1
-
-        proposal = (etat.tasks[0].interrupts[0].value) if etat.tasks else None
-        if proposal is None:
-            print(
-                f"❌ Le run {args.thread_id!r} est arrêté, mais pas sur une proposition"
-            )
-            return 1
-
-        if args.decision is None:
-            afficher_proposition(proposal)
-            print(f"\n  → uv run python -m scripts.decide {args.thread_id} approve\n")
-            return 0
-
-        # --- Poser une question plutôt que trancher -------------------------
-        if args.decision == VERBE_QUESTION:
-            if not args.question:
-                print(
-                    f"❌ Il manque la question : "
-                    f'... {args.thread_id} {VERBE_QUESTION} "pourquoi … ?"'
-                )
-                return 1
-
-            resultat = app.invoke(
-                Command(
-                    resume={
-                        "decision": DEMANDE_QUESTION,
-                        "question": args.question,
-                        "decided_by": args.decided_by,
-                    }
-                ),
-                config,
-            )
-
-            suite = proposition_en_attente(resultat)
-            if suite is None:
-                # Le run s'est terminé au lieu de revenir : plafond d'échanges.
-                print(
-                    "⚠️  Plafond d'échanges atteint — le run s'est clos sans décision."
-                )
-                print("   Rien n'a été écrit. Relance un run pour reprendre.")
-                return 1
-
-            print(f"\n  Agent │ {suite['conversation'][-1]['message']}\n")
-            print(f"  ({suite['questions_restantes']} question(s) restante(s))")
-            print(f"  → uv run python -m scripts.decide {args.thread_id} approve\n")
-            return 0
-
-        # `fix_override` n'a de sens que sur une approbation : amender un contrat
-        # ou refuser n'écrit rien dans les données, donc il n'y a pas de SQL à
-        # réécrire. L'accepter silencieusement laisserait croire le contraire.
-        if args.fix_override and VERBES[args.decision] != DECISION_APPROVED:
-            print("❌ --fix n'a de sens qu'avec 'approve' (les autres n'écrivent rien)")
-            return 1
-
-        resultat = app.invoke(
-            Command(
-                resume={
-                    "decision": VERBES[args.decision],
-                    "decided_by": args.decided_by,
-                    "fix_override": args.fix_override,
-                }
-            ),
-            config,
-        )
-
-        if proposition_en_attente(resultat) is not None:
-            print(
-                "⏸  Le run s'est de nouveau interrompu (autre proposition en attente)"
-            )
-            return 0
-
-        parcours = " → ".join(entree["node"] for entree in resultat["logs"])
-        print(f"✅ Décision {VERBES[args.decision]!r} enregistrée")
-        print(f"   Parcours : {parcours}")
-        if resultat["applied_fix"]:
-            print(f"   Appliqué : {resultat['applied_fix']}")
-        if resultat["contract_version"]:
-            print(f"   Contrat  : version {resultat['contract_version']}")
+    if args.decision is None:
+        afficher_proposition(proposal)
+        print(f"\n  → uv run python -m scripts.decide {args.thread_id} approve\n")
         return 0
 
+    # --- Poser une question plutôt que trancher -------------------------
+    if args.decision == VERBE_QUESTION:
+        if not args.question:
+            print(
+                f"❌ Il manque la question : "
+                f'... {args.thread_id} {VERBE_QUESTION} "pourquoi … ?"'
+            )
+            return 1
 
-if __name__ == "__main__":
-    sys.exit(main())
+        reponse = questionner(args.thread_id, args.question, args.decided_by, args.db)
+        if not reponse["ok"]:
+            print(f"⚠️  {reponse['erreur']}")
+            return 1
+
+        print(f"\n  Agent │ {reponse['reponse']}\n")
+        print(f"  ({reponse['questions_restantes']} question(s) restante(s))")
+        print(f"  → uv run python -m scripts.decide {args.thread_id} approve\n")
+        return 0
+
+    resultat = trancher(
+        args.thread_id,
+        VERBES[args.decision],
+        par=args.decided_by,
+        fix_override=args.fix_override,
+        db=args.db,
+    )
+    if not resultat["ok"]:
+        print(f"❌ {resultat['erreur']}")
+        # Le module partagé **nomme** la situation ; c'est à l'interface de la
+        # traduire dans son vocabulaire. `--fix` n'existe qu'ici — Streamlit,
+        # lui, désactivera un bouton.
+        if resultat.get("code") == CORRECTION_SANS_APPROBATION:
+            print("   (--fix ne s'utilise qu'avec 'approve')")
+        return 1
+
+    if resultat["en_attente"]:
+        print("⏸  Le run s'est de nouveau interrompu (autre proposition en attente)")
+        return 0
+
+    print(f"✅ Décision {resultat['decision']!r} enregistrée")
+    print(f"   Parcours : {' → '.join(resultat['parcours'])}")
+    if resultat["applied_fix"]:
+        print(f"   Appliqué : {resultat['applied_fix']}")
+    if resultat["contract_version"]:
+        print(f"   Contrat  : version {resultat['contract_version']}")
+    return 0
 
 
 def _lister(db) -> int:
@@ -246,3 +214,7 @@ def _lister(db) -> int:
             print(f"     impact : {p['resume']}")
     print(f"\n{len(attente)} proposition(s) en attente de décision.")
     return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

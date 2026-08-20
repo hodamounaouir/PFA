@@ -790,7 +790,7 @@ def test_decide_refuse_un_thread_inconnu(tmp_path):
         text=True,
     )
     assert resultat.returncode == 1
-    assert "Aucun run en attente" in resultat.stdout
+    assert "aucune proposition en attente" in resultat.stdout.lower()
 
 
 def test_decide_refuse_une_correction_reecrite_sans_approbation(tmp_path):
