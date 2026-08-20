@@ -56,6 +56,8 @@ from datetime import datetime, timezone
 
 from langgraph.types import interrupt
 
+from agent.impact import estimer
+
 from agent.state import (
     DECISION_AMEND,
     DECISION_APPROVED,
@@ -90,7 +92,10 @@ def build_proposal(state: AgentState) -> dict:
 
     Le champ **`impact` est le plus important de tous** : sans lui, personne ne
     peut juger. « 1 ligne sur 351 » paraît négligeable jusqu'à voir qu'elle
-    déplace un indicateur métier de 54 %. Il sera calculé en phase 5.1.
+    déplace un indicateur métier de 54 % — et un humain qui ne peut pas juger
+    n'approuve pas, il signe. Calculé depuis 5.1 par `agent/impact.py`, **sans
+    aucune requête** : sur ce que `profile` a déjà mesuré, faute de quoi la
+    proposition comparerait un lot d'il y a dix minutes à une base de maintenant.
     """
     diagnosis = state["diagnosis"] or {}
     return {
@@ -105,7 +110,7 @@ def build_proposal(state: AgentState) -> dict:
         "proposed_fix": diagnosis.get("proposed_fix"),
         "explanation": diagnosis.get("explanation"),
         # de quoi décider
-        "impact": "non calculé (stub)",
+        "impact": estimer(state["anomalies"], state["profile"]),
         "past_incidents": state["past_incidents"],
         "choix": list(CHOIX),
         # le dialogue déjà tenu, pour que l'humain reprenne où il en était même

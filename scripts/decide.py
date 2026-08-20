@@ -32,7 +32,13 @@ import sys
 
 from langgraph.types import Command
 
-from agent.graph import CHECKPOINT_DB, agent_persistant, proposition_en_attente, thread
+from agent.graph import (
+    CHECKPOINT_DB,
+    agent_persistant,
+    proposition_en_attente,
+    propositions_en_attente,
+    thread,
+)
 from agent.state import (
     DECISION_AMEND,
     DECISION_APPROVED,
@@ -90,7 +96,17 @@ def afficher_proposition(proposal: dict) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("thread_id", help="identifiant du run en pause")
+    parser.add_argument(
+        "thread_id",
+        nargs="?",
+        help="identifiant du run en pause (omis avec --list)",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        dest="lister",
+        help="la file des propositions en attente, tous runs confondus",
+    )
     parser.add_argument(
         "decision",
         nargs="?",
@@ -112,6 +128,15 @@ def main() -> int:
     )
     parser.add_argument("--db", default=CHECKPOINT_DB, help="base de checkpoints")
     args = parser.parse_args()
+
+    # ⭐ La file d'attente (5.1). Sans elle, un run mis en pause par Airflow à
+    # 3 h du matin n'existe pour personne : il faut déjà connaître son
+    # `thread_id` pour le retrouver, donc savoir qu'il existe.
+    if args.lister:
+        return _lister(args.db)
+
+    if not args.thread_id:
+        parser.error("thread_id est requis (ou utilisez --list)")
 
     with agent_persistant(args.db) as app:
         config = thread(args.thread_id)
@@ -203,3 +228,21 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def _lister(db) -> int:
+    """La file des propositions en attente — ce que Streamlit montrera en 6."""
+    attente = propositions_en_attente(db)
+    if not attente:
+        print("Aucune proposition en attente.")
+        return 0
+
+    for p in attente:
+        print(f"⏸  {p['thread_id']}")
+        print(f"     {p['table']} · lot {p['batch_id']} · {p['anomalies']} écart(s)")
+        if p["resume"]:
+            # L'impact d'abord : c'est ce qui permet de choisir **laquelle**
+            # traiter en premier quand il y en a dix.
+            print(f"     impact : {p['resume']}")
+    print(f"\n{len(attente)} proposition(s) en attente de décision.")
+    return 0

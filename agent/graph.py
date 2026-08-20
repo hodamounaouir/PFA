@@ -252,6 +252,67 @@ def thread(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
 
 
+def propositions_en_attente(db=CHECKPOINT_DB) -> list[dict]:
+    """Toutes les propositions qui attendent une décision, **hors process** (5.1).
+
+    C'est la file que Streamlit affichera en phase 6, et que `scripts/decide.py
+    --list` montre aujourd'hui. Sans elle, un run mis en pause par Airflow à
+    3 h du matin n'existe pour personne : il faut déjà connaître son `thread_id`
+    pour le retrouver, donc savoir qu'il existe.
+
+    Rend `[{thread_id, table, batch_id, anomalies, resume}]`, du plus ancien au
+    plus récent — l'ordre dans lequel on veut traiter une file d'attente.
+
+    ⚠️ **Ces propositions n'ont pas encore de ligne dans `INCIDENTS`** : un run
+    en pause n'a pas atteint `log`, qui est sa sortie. La file se lit donc dans
+    le **checkpointer seul**, et c'est normal — la jointure avec `INCIDENTS` que
+    le plan évoquait vaut pour les runs *terminés*, pas pour ceux qui attendent.
+
+    On passe par l'API du checkpointer (`saver.list`) plutôt que par une requête
+    sur sa base : le schéma interne de LangGraph n'est pas un contrat, et du SQL
+    ici serait du SQL hors des connecteurs.
+    """
+    attente = []
+    with SqliteSaver.from_conn_string(str(db)) as saver:
+        app = build_graph().compile(checkpointer=saver)
+        # ⚠️ On **matérialise** la liste avant de la parcourir. `saver.list()`
+        # rend un générateur adossé à un curseur SQLite ; interroger la même
+        # connexion pendant qu'on le consomme (ce que fait `get_state`) bloque.
+        # Le symptôme est une suite de tests qui ne finit jamais, et il ne
+        # ressemble pas à sa cause.
+        fils = []
+        vus = set()
+        for enregistrement in list(saver.list(None)):
+            fil = enregistrement.config["configurable"]["thread_id"]
+            if fil not in vus:
+                vus.add(fil)
+                fils.append(fil)
+
+        for fil in fils:
+            etat = app.get_state(thread(fil))
+            propositions = [
+                interruption.value
+                for tache in etat.tasks
+                for interruption in (tache.interrupts or ())
+            ]
+            if not propositions:
+                continue
+
+            proposition = propositions[0]
+            attente.append(
+                {
+                    "thread_id": fil,
+                    "table": proposition.get("table"),
+                    "batch_id": proposition.get("batch_id"),
+                    "anomalies": len(proposition.get("anomalies") or []),
+                    "resume": (proposition.get("impact") or {}).get("resume"),
+                }
+            )
+    # Du plus ancien au plus récent : `saver.list` rend l'inverse, et une file
+    # d'attente se traite dans l'ordre d'arrivée.
+    return sorted(attente, key=lambda p: (p["batch_id"] or "", p["thread_id"]))
+
+
 def proposition_en_attente(resultat) -> dict | None:
     """La proposition soumise à l'humain, ou None si le run est allé au bout.
 
