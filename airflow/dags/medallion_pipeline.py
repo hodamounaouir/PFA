@@ -82,6 +82,23 @@ with DAG(
         bash_command=f"cd {PROJECT} && {PY} -m ingestion.load --day {{{{ ds }}}}",
     )
 
+    # 3bis) L'AGENT sur Bronze (phase 4.5). Aucune logique ici : tout est dans
+    #       `scripts/check_layer`, testable sans Airflow ni Docker.
+    #
+    #       ⭐ Le code de sortie ne dit qu'une chose : l'agent a-t-il pu tourner ?
+    #       Une proposition en attente de décision humaine est le fonctionnement
+    #       NORMAL de l'agent — si elle faisait rougir le DAG, le pipeline serait
+    #       rouge chaque fois que l'agent fait son travail, et l'équipe
+    #       apprendrait à ignorer un pipeline rouge. Même convention qu'en 2.3
+    #       pour les tests dbt (rc=1 = détection = vert).
+    check_bronze = BashOperator(
+        task_id="check_bronze",
+        bash_command=(
+            f"cd {PROJECT} && {PY} -m scripts.check_layer olist bronze "
+            f"--day {{{{ ds }}}}"
+        ),
+    )
+
     # 4) Silver : vues stg_ (typage), puis leurs tests baseline.
     dbt_run_silver = BashOperator(
         task_id="dbt_run_silver",
@@ -92,6 +109,16 @@ with DAG(
         bash_command=(
             f"cd {DBT_DIR} && {DBT} test --select staging --profiles-dir . --target dev "
             f"--target-path target/silver; " + DBT_TEST_TOLERATE
+        ),
+    )
+
+    # 4bis) L'agent sur Silver — il reçoit en plus les échecs de `dbt test`
+    #       (lus dans target/silver/) comme anomalies DÉJÀ CONFIRMÉES.
+    check_silver = BashOperator(
+        task_id="check_silver",
+        bash_command=(
+            f"cd {PROJECT} && {PY} -m scripts.check_layer olist silver "
+            f"--day {{{{ ds }}}}"
         ),
     )
 
@@ -109,6 +136,15 @@ with DAG(
     )
 
     # 6) Archive le résultat baseline du jour vs ground_truth → benchmarks/baseline_run.json
+    # 5bis) L'agent sur Gold — la couche où les chiffres faux se voient.
+    check_gold = BashOperator(
+        task_id="check_gold",
+        bash_command=(
+            f"cd {PROJECT} && {PY} -m scripts.check_layer olist gold "
+            f"--day {{{{ ds }}}}"
+        ),
+    )
+
     archive_baseline = BashOperator(
         task_id="archive_baseline",
         bash_command=f"cd {PROJECT} && {PY} -m benchmarks.archive_baseline --day {{{{ ds }}}}",
@@ -118,9 +154,12 @@ with DAG(
         replay
         >> inject
         >> ingest_bronze
+        >> check_bronze
         >> dbt_run_silver
         >> dbt_test_silver
+        >> check_silver
         >> dbt_run_gold
         >> dbt_test_gold
+        >> check_gold
         >> archive_baseline
     )

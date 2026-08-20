@@ -58,7 +58,13 @@ CONTRAT = "contrat"
 STATISTIQUE = "statistique"
 SEMANTIQUE = "semantique"
 
-FAMILLES = (INVENTAIRE, SCHEMA, CONTRAT, STATISTIQUE, SEMANTIQUE)
+# ⚠️ `dbt` n'est pas une famille de **détection** : elle ne constate rien, elle
+# traduit les verdicts d'un outil qui a déjà tranché. Elle porte quand même une
+# étiquette de famille pour que ses écarts traversent la même forme commune —
+# donc le même diagnostic, la même signature, la même mémoire, le même journal.
+DBT = "dbt"
+
+FAMILLES = (INVENTAIRE, SCHEMA, CONTRAT, STATISTIQUE, SEMANTIQUE, DBT)
 
 # Les six dimensions DAMA retenues par le cahier des charges. Chaque écart en
 # porte une : c'est elle qui permettra, en phase 8, de dire *quelle sorte* de

@@ -255,11 +255,16 @@ def test_detect_ne_signale_rien_quand_tout_est_propre():
     assert detect(state)["anomalies"] == []
 
 
-def test_detect_agrege_les_cinq_familles():
+def test_detect_agrege_toutes_les_familles():
     """Le nœud n'est qu'un chef d'orchestre : la logique vit dans les familles.
 
     On vérifie ici qu'il les appelle **toutes** et concatène — le détail de
     chacune est éprouvé dans `tests/test_detect.py`.
+
+    `dbt` vient en dernier, et à part : elle ne détecte rien, elle traduit des
+    verdicts déjà rendus par un outil tiers. La lire après les cinq autres met
+    le constat de l'agent avant celui d'un outil tiers, ce qui est l'ordre dans
+    lequel un humain veut lire.
     """
     from agent.nodes.detect import FAMILLES
 
@@ -269,6 +274,7 @@ def test_detect_agrege_les_cinq_familles():
         "contrat",
         "statistique",
         "semantique",
+        "dbt",
     ]
 
 

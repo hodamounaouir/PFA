@@ -36,7 +36,15 @@ Ajout prévu en 4.4 : un dernier filtre avant de sortir. Si la *signature* d'un
 écart a déjà été refusée par un humain, il est journalisé mais pas soumis.
 """
 
-from agent.detect import contrat, inventaire, schema, semantique, silence, statistique
+from agent.detect import (
+    contrat,
+    dbt,
+    inventaire,
+    schema,
+    semantique,
+    silence,
+    statistique,
+)
 from agent.incidents import signature, texte
 from agent.state import AgentState, log_entry
 
@@ -48,6 +56,10 @@ FAMILLES = (
     ("contrat", contrat.detecter),
     ("statistique", statistique.detecter),
     ("semantique", semantique.detecter),
+    # En dernier, et à part : `dbt` ne détecte rien, elle traduit des verdicts
+    # déjà rendus. La lire après les cinq autres met le constat de l'agent avant
+    # celui d'un outil tiers — c'est l'ordre dans lequel un humain veut lire.
+    ("dbt", dbt.detecter),
 )
 
 

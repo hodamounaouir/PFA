@@ -69,6 +69,11 @@ class AgentState(TypedDict):
     # normal il n'y en a aucune, donc l'inventaire ne coûte qu'une requête.
     inventory: dict
 
+    # Les échecs de `dbt test` du run en cours (phase 4.5) — des anomalies
+    # **déjà confirmées** par un outil déterministe, fournies par la tâche
+    # Airflow et non mesurées par l'agent. Forme : voir `agent/dbt_results.py`.
+    dbt_failures: list
+
     # --- Profile : le batch résumé en agrégats ------------------------------
     profile: dict  # volumes, nulls, cardinalités, min/max… jamais de lignes brutes
 
@@ -143,6 +148,7 @@ def new_state(dataset: str, layer: str, table: str, batch_id: str) -> AgentState
         contract_version=None,
         schema_history=[],
         inventory={},
+        dbt_failures=[],
         profile={},
         profile_history={},
         anomalies=[],

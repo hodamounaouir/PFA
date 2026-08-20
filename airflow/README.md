@@ -104,7 +104,59 @@ docker compose down -v       # + efface les volumes (repart de zéro : refais l'
 
 ---
 
-## 7. En cas de souci
+## 7. L'agent dans le DAG (phase 4.5)
+
+Depuis la phase 4.5, le DAG compte **11 tâches** au lieu de 8 : `check_bronze`,
+`check_silver` et `check_gold` lancent l'agent après chaque couche.
+
+```
+… ingest_bronze → check_bronze → dbt_run_silver → dbt_test_silver → check_silver
+                → dbt_run_gold → dbt_test_gold   → check_gold      → archive_baseline
+```
+
+Comme les huit autres, ce sont de simples `BashOperator` : toute la logique vit
+dans [`scripts/check_layer.py`](../scripts/check_layer.py), donc elle se teste
+sans Docker ni Airflow.
+
+### ⭐ Une tâche `check_*` verte ne veut pas dire « rien trouvé »
+
+Le code de sortie ne répond qu'à une question : **l'agent a-t-il pu tourner ?**
+
+| Sortie | Signification |
+|:-:|---|
+| `0` | toutes les tables ont été examinées — avec ou sans proposition en attente |
+| `1` | au moins une table n'a pas pu l'être : là, il y a vraiment un problème |
+
+Une proposition en attente de décision humaine est le fonctionnement **normal**
+de l'agent. Si elle faisait rougir le DAG, le pipeline serait rouge chaque fois
+que l'agent fait son travail — et un pipeline rouge en permanence est un
+pipeline qu'on cesse de regarder. C'est la même convention qu'au §3 pour les
+tests dbt (`rc=1` = détection = vert).
+
+**Ce que l'agent a trouvé se lit dans `OPS.INCIDENTS`**, pas dans un code de
+retour. Les logs de la tâche listent les runs en attente avec la commande pour
+les reprendre.
+
+### Reprendre un run mis en pause par le DAG
+
+Le `thread_id` est reconstructible de tête : `<dataset>|<table>|<jour>`.
+
+```powershell
+uv run python -m scripts.decide "olist|RAW.ORDERS|2018-04-29"                # voir
+uv run python -m scripts.decide "olist|RAW.ORDERS|2018-04-29" approve --by hoda
+```
+
+Cette commande se lance **sur le PC, hors du conteneur** — et elle fonctionne
+parce que le repo entier est monté dans Airflow (`../:/opt/airflow/project`) :
+le fichier de checkpoints `agent_checkpoints.sqlite` vit à la racine du repo,
+donc des deux côtés à la fois. Rien à configurer.
+
+> ⚠️ Sur Linux, le conteneur tourne sous `AIRFLOW_UID` : le fichier de
+> checkpoints créé par le DAG peut appartenir à cet utilisateur. Si
+> `scripts/decide.py` se plaint des permissions, un `chown` suffit. Sous Docker
+> Desktop (Windows/macOS) le cas ne se pose pas.
+
+## 8. En cas de souci
 
 | Symptôme | Cause probable / solution |
 |---|---|
