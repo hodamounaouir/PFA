@@ -56,6 +56,7 @@ from datetime import datetime, timezone
 
 from langgraph.types import interrupt
 
+from agent.corrections import GESTES
 from agent.impact import estimer
 
 from agent.state import (
@@ -111,6 +112,13 @@ def build_proposal(state: AgentState) -> dict:
         "explanation": diagnosis.get("explanation"),
         # de quoi décider
         "impact": estimer(state["anomalies"], state["profile"]),
+        # Ce que l'agent a le droit de faire (P6, phase 5.2). Affiché même quand
+        # la correction proposée est acceptable : un humain qui voit les quatre
+        # gestes autorisés comprend en une ligne pourquoi l'agent ne propose
+        # jamais de remplacer une valeur — et n'a pas à le redemander.
+        "gestes_autorises": dict(GESTES),
+        "alertes_p6": diagnosis.get("alertes_p6"),
+        "correction_par_defaut": diagnosis.get("correction_par_defaut"),
         "past_incidents": state["past_incidents"],
         "choix": list(CHOIX),
         # le dialogue déjà tenu, pour que l'humain reprenne où il en était même

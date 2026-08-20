@@ -28,6 +28,8 @@ la mémoire, qui permet de citer un incident identique déjà tranché (objectif
 """
 
 from agent.llm import MODELE, diagnostiquer, repondre
+from agent.corrections import controler as controler_p6
+from agent.corrections import correction_par_defaut
 from agent.sql_guard import controler
 from agent.tools.read_past_incidents import incidents_similaires, resumer
 from agent.state import AgentState, echange, log_entry
@@ -173,14 +175,28 @@ def diagnose(state: AgentState) -> dict:
     if alertes:
         rendu["alertes_sql"] = alertes
 
+    # Garde-fou P6 (5.2), montré **avant** la décision. `apply` refusera de
+    # toute façon — mais découvrir le refus après avoir approuvé serait vexant
+    # et surtout inutile : l'humain doit pouvoir réécrire la correction tout de
+    # suite, puisque son autorité, elle, n'est pas soumise à P6.
+    inventions = controler_p6(
+        rendu.get("proposed_fix"), state["anomalies"], state["profile"]
+    )
+    if inventions:
+        rendu["alertes_p6"] = inventions
+        # Et on lui montre le geste sûr, plutôt que de le laisser sans issue.
+        rendu["correction_par_defaut"] = correction_par_defaut(anomalies[0])
+
     journal = log_entry(
         "diagnose",
-        "diagnostic produit",
+        "diagnostic produit" + (" (correction inacceptable)" if inventions else ""),
         anomalies=len(anomalies),
         modele=MODELE,
         incidents_cites=len(_memoire(state)),
     )
     if alertes:
         journal["alertes_sql"] = alertes
+    if inventions:
+        journal["alertes_p6"] = inventions
 
     return {"diagnosis": rendu, "logs": [journal]}

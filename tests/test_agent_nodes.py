@@ -664,6 +664,12 @@ def test_la_proposition_porte_de_quoi_decider():
         "impact",
         "past_incidents",
         "choix",
+        # ajoutés en 5.2 : l'humain doit savoir ce que l'agent a le DROIT de
+        # faire, sinon il ne comprend pas pourquoi la correction proposée
+        # n'est jamais « remplacer par la bonne valeur ».
+        "gestes_autorises",
+        "alertes_p6",
+        "correction_par_defaut",
         # ajoutés avec le dialogue : l'humain doit retrouver le fil même s'il
         # revient le lendemain, depuis un autre poste
         "conversation",

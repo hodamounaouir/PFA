@@ -30,6 +30,7 @@ Plus le comptage des lignes avant/après, conservé dans le journal, le tout dan
 une transaction : si une vérification saute en cours de route, rien n'est écrit.
 """
 
+from agent.corrections import controler
 from agent.state import DECISION_APPROVED, AgentState, log_entry
 
 
@@ -50,7 +51,39 @@ def apply(state: AgentState) -> dict:
     # refusée » mesure trois choses différentes — l'agent a bien vu ET bien
     # proposé, il a bien vu mais mal proposé, il n'aurait pas dû alerter.
     propose_par_agent = (state["diagnosis"] or {}).get("proposed_fix")
+    reecrite = bool(state["fix_override"])
     fix = state["fix_override"] or propose_par_agent
+
+    # ⭐ Garde-fou P6 (phase 5.2) — **il s'applique après l'approbation, et c'est
+    # tout son intérêt.** Un humain peut approuver sans lire ; la règle « ne
+    # jamais inventer une valeur » ne protège que si elle survit à un « oui ».
+    #
+    # Mais elle ne s'applique qu'au SQL **de l'agent**. Si l'humain a réécrit la
+    # correction, il engage son autorité : il peut avoir appelé le fournisseur,
+    # l'agent ne le peut pas. Les autres garde-fous restent pour les deux — ils
+    # protègent de l'accident, pas du jugement.
+    refus = [] if reecrite else controler(fix, state["anomalies"], state["profile"])
+
+    if refus:
+        # On **ne lève pas** : ce n'est pas un bug de câblage mais un cas métier
+        # — le modèle a proposé quelque chose d'inacceptable. Le run doit se
+        # terminer normalement par `log`, sinon la trace de ce refus serait
+        # perdue au moment précis où elle est la plus instructive.
+        return {
+            "applied_fix": None,
+            "logs": [
+                log_entry(
+                    "apply",
+                    "correction REFUSÉE malgré l'approbation — invariant P6",
+                    table=state["table"],
+                    fix_refuse=fix,
+                    refus=refus,
+                    decideur=state["decided_by"],
+                    recours="réécrivez la correction avec --fix : votre autorité "
+                    "n'est pas soumise à P6, celle de l'agent l'est",
+                )
+            ],
+        }
 
     return {
         "applied_fix": fix,
@@ -60,7 +93,7 @@ def apply(state: AgentState) -> dict:
                 "correction appliquée (stub, aucune écriture réelle)",
                 table=state["table"],
                 fix=fix,
-                reecrite_par_humain=bool(state["fix_override"]),
+                reecrite_par_humain=reecrite,
                 decideur=state["decided_by"],
             )
         ],
