@@ -564,3 +564,57 @@ def test_le_cycle_complet_depuis_un_profil(tmp_path):
     assert relu["columns"]["CUSTOMER_CITY"]["no_semantic_collisions"] is True
     assert "accepted_values" not in relu["columns"]["CUSTOMER_CITY"]
     assert relu["warnings"][0]["kind"] == COLLISION
+
+
+# ---------------------------------------------------------------------------
+# Signer un contrat — la voie partagée (phase 6.2)
+# ---------------------------------------------------------------------------
+
+
+def test_signer_exige_un_signataire(tmp_path):
+    """⭐ Un contrat sans signataire ne prouve rien six mois plus tard.
+
+    C'est la même traçabilité que `decided_by` dans le cycle de surveillance —
+    et le garde-fou vit **dans le module partagé**, pas dans le `argparse` de
+    `discover.py` : l'interface Streamlit doit l'hériter sans le réécrire.
+
+    Écrit après un sabotage passé inaperçu : retirer cette vérification laissait
+    la suite verte, alors qu'un bouton mal câblé aurait pu signer sous « None ».
+    """
+    from agent.contracts.validation import approuver
+
+    contrat = proposer_contrat_jouet()
+    ecrire(contrat, "jouet", tmp_path)
+
+    for sans_nom in ("", "   ", None):
+        with pytest.raises(ContratInvalide):
+            approuver("jouet", contrat["table"], sans_nom, dossier=tmp_path)
+
+
+def test_signer_une_reserve_exige_de_l_accepter(tmp_path):
+    """Signer une collision sémantique est une **décision**, pas une formalité.
+    Sans ce garde-fou, toute la critique de la découverte serait décorative."""
+    from agent.contracts.validation import approuver
+
+    contrat = proposer_contrat_jouet()
+    contrat["warnings"] = [
+        {"column": "VILLE", "kind": "partial_evidence", "detail": "43%"}
+    ]
+    ecrire(contrat, "jouet", tmp_path)
+
+    with pytest.raises(ContratInvalide):
+        approuver("jouet", contrat["table"], "hoda", dossier=tmp_path)
+
+    signe = approuver("jouet", contrat["table"], "hoda", True, dossier=tmp_path)
+    assert signe["status"] == "approved" and signe["approved_by"] == "hoda"
+
+
+def proposer_contrat_jouet() -> dict:
+    return {
+        "table": "RAW.JOUET",
+        "version": 1,
+        "status": "proposed",
+        "source": {"batch_id": None, "row_count": 10},
+        "columns": {"VILLE": {"role": "categorical", "not_null": True}},
+        "warnings": [],
+    }

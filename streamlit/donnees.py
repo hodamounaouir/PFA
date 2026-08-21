@@ -205,3 +205,156 @@ def agregat(dataset: str, table: str, limite: int = 200) -> dict:
         return connecteur.executer(f"SELECT * FROM {table}", limite)
     finally:
         fermer(connecteur)
+
+
+# ---------------------------------------------------------------------------
+# Traduire pour des yeux non techniques (phase 6.2)
+# ---------------------------------------------------------------------------
+#
+# ⭐ Les écrans s'adressent à quelqu'un qui connaît **le métier**, pas le
+# vocabulaire du projet. « écart de famille sémantique, octave -2 » ne dit rien
+# à la personne qui décide si les ventes par ville sont justes.
+#
+# La traduction vit ici et non dans les vues : c'est une règle, donc ça se teste.
+# Et un mot mal traduit se corrige à un seul endroit.
+
+ROLES_LISIBLES = {
+    "identifier": "identifiant",
+    "foreign_key": "référence vers une autre table",
+    "categorical": "catégorie",
+    "numeric": "nombre",
+    "temporal": "date",
+    "free_text": "texte libre",
+    "unknown": "indéterminé",
+}
+
+DAMA_LISIBLES = {
+    "completude": "des valeurs manquent",
+    "unicite": "des doublons",
+    "validite": "des valeurs inattendues",
+    "coherence": "des écritures qui se contredisent",
+    "exactitude": "des valeurs hors normes",
+    "fraicheur": "des données en retard",
+}
+
+DECISIONS_LISIBLES = {
+    "approved": "✅ corrigé",
+    "amend_contract": "📝 règle ajustée",
+    "rejected": "❌ écarté",
+    "en attente": "⏳ à décider",
+    "rien d'anormal": "✅ rien à signaler",
+}
+
+
+def clause_lisible(nom: str, valeur) -> str:
+    """Une clause de contrat, dite en français.
+
+    Le contrat est ce que l'agent tient pour vrai : c'est **la** chose qu'un
+    métier doit pouvoir relire avant de la signer. `{"between": [1, 100]}` ne se
+    relit pas ; « doit rester entre 1 et 100 » se relit.
+    """
+    if nom == "not_null":
+        return "ne doit jamais être vide"
+    if nom == "unique":
+        return "chaque valeur doit être unique"
+    if nom == "between":
+        bas, haut = valeur
+        return f"doit rester entre {bas} et {haut}"
+    if nom == "accepted_values":
+        apercu = ", ".join(str(v) for v in list(valeur)[:5])
+        reste = f" (+{len(valeur) - 5})" if len(valeur) > 5 else ""
+        return f"doit valoir l'une de {len(valeur)} valeurs : {apercu}{reste}"
+    if nom == "no_semantic_collisions":
+        return "deux façons d'écrire la même valeur sont interdites (São Paulo / Sao Paulo)"
+    return f"{nom} : {valeur}"
+
+
+def colonnes_lisibles(contrat: dict) -> list[dict]:
+    """Le contrat en tableau, une ligne par colonne."""
+    lignes = []
+    for colonne, clauses in (contrat.get("columns") or {}).items():
+        regles = [
+            clause_lisible(nom, valeur)
+            for nom, valeur in clauses.items()
+            if nom != "role" and valeur is not None
+        ]
+        lignes.append(
+            {
+                "Colonne": colonne,
+                "Nature": ROLES_LISIBLES.get(clauses.get("role"), clauses.get("role")),
+                "Ce qui est exigé": " · ".join(regles) if regles else "—",
+            }
+        )
+    return lignes
+
+
+def anomalie_lisible(anomalie: dict) -> str:
+    """Un écart, dit en une phrase.
+
+    On garde le **chiffre** et on traduit le reste : « des valeurs manquent »
+    sans « 51 lignes » ne servirait à personne pour décider.
+    """
+    quoi = DAMA_LISIBLES.get(anomalie.get("dama"), anomalie.get("type"))
+    ou = anomalie.get("colonne") or anomalie.get("table") or ""
+    observe = anomalie.get("observe")
+    combien = ""
+    if isinstance(observe, (int, float)) and not isinstance(observe, bool):
+        combien = f" — {observe}"
+    elif isinstance(observe, (list, tuple)) and observe:
+        combien = f" — {', '.join(str(v) for v in observe[:3])}"
+    return f"{quoi} sur « {ou} »{combien}"
+
+
+# ---------------------------------------------------------------------------
+# Écran d'accueil — l'état du système en quatre chiffres
+# ---------------------------------------------------------------------------
+
+
+def vue_ensemble(dataset: str) -> dict:
+    """Ce qu'on veut savoir en arrivant : tout va-t-il bien, et que dois-je faire ?
+
+    Chaque source est interrogée **séparément** et son échec est isolé : un
+    accès expiré ne doit pas vider l'écran d'accueil des informations qui, elles,
+    sont lisibles depuis le disque (les contrats, par exemple).
+    """
+    etat = {"erreurs": []}
+
+    def _essayer(cle, appel, defaut):
+        try:
+            etat[cle] = appel()
+        except Exception as exc:  # noqa: BLE001 — voir le docstring
+            etat[cle] = defaut
+            etat["erreurs"].append(f"{cle} : {type(exc).__name__}")
+
+    _essayer("tables", lambda: len(charger_registre(dataset).tables), 0)
+    _essayer("contrats", lambda: contrats(dataset), [])
+    _essayer("attente", lambda: file_attente(), [])
+    _essayer("incidents", lambda: journal(dataset, limite=200), [])
+
+    signes = [c for c in etat["contrats"] if c["status"] == "approved"]
+    a_signer = [c for c in etat["contrats"] if c["status"] != "approved"]
+    avec_ecart = [i for i in etat["incidents"] if i.get("anomalies")]
+
+    etat.update(
+        {
+            "contrats_en_vigueur": len(signes),
+            "contrats_a_signer": len(a_signer),
+            "decisions_en_attente": len(etat["attente"]),
+            "runs": len(etat["incidents"]),
+            "runs_avec_ecart": len(avec_ecart),
+        }
+    )
+    etat["a_faire"] = etat["decisions_en_attente"] + etat["contrats_a_signer"]
+    return etat
+
+
+def valider_contrat(dataset: str, table: str, par: str, accepter: bool = False) -> dict:
+    """Signe un contrat — **la même fonction** que `scripts/discover.py --approve`.
+
+    Une seconde voie de validation serait une seconde façon de contourner le
+    garde-fou des avertissements, et la critique de la découverte deviendrait
+    décorative.
+    """
+    from agent.contracts.validation import approuver
+
+    return approuver(dataset, table, par, accepter)

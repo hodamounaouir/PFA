@@ -64,7 +64,8 @@ from agent.contracts import (
     lister,
     proposer,
 )
-from agent.contracts.loader import CONTRACTS_DIR, _lire
+from agent.contracts.loader import CONTRACTS_DIR
+from agent.contracts.validation import approuver
 from agent.registry import charger as charger_registre
 from agent.tools import profile_table
 
@@ -99,57 +100,10 @@ def decouvrir(dataset: str, tables=None, dossier=CONTRACTS_DIR) -> list[dict]:
     return comptes_rendus
 
 
-def approuver(
-    dataset: str,
-    table: str,
-    par: str,
-    accepter_avertissements: bool = False,
-    dossier=CONTRACTS_DIR,
-) -> dict:
-    """Fait passer un contrat de `proposed` à `approved`. **Relu depuis le disque.**
-
-    Relu, et non repris d'une mémoire quelconque : c'est le fichier que l'humain
-    a sous les yeux et qu'il a peut-être modifié qui fait foi. Prendre une autre
-    copie effacerait ses corrections.
-
-    Un contrat que la découverte a **critiqué** exige `accepter_avertissements` :
-    signer une collision sémantique ou une preuve partielle est une décision, pas
-    une formalité, et elle doit être posée les yeux ouverts.
-
-    Re-signer un contrat déjà en vigueur est refusé — mais **pas ici** : c'est
-    `ecrire()` qui l'interdit, parce que c'est lui qui touche au disque. Une
-    première version de cette fonction refaisait le contrôle en tête ; un
-    sabotage l'a retiré sans qu'aucun test ne rougisse, ce qui était le bon
-    diagnostic : le contrôle en double ne portait rien, et il donnait l'illusion
-    d'une garantie qui vit ailleurs.
-    """
-    en_attente = [c for c in lister(dataset, dossier) if c["table"] == table]
-    if not en_attente:
-        raise ContratInvalide(f"Aucun contrat sur disque pour {table!r} ({dataset})")
-
-    # La **dernière** version : une v2 en discussion se signe, pendant que la v1
-    # validée continue de gouverner la surveillance jusqu'à ce qu'elle le soit.
-    dernier = max(en_attente, key=lambda c: c["version"])
-    contrat = _lire(dernier["path"])
-    if contrat["warnings"] and not accepter_avertissements:
-        raise ContratInvalide(
-            f"{dernier['path']} : {len(contrat['warnings'])} avertissement(s) — "
-            f"relisez-les puis confirmez avec --accept-warnings"
-        )
-
-    # Qui a signé : la même traçabilité que `decided_by` dans le cycle de
-    # surveillance. Un contrat sans signataire ne prouve rien six mois plus tard.
-    contrat["status"] = APPROUVE
-    contrat["approved_by"] = par
-    ecrire(contrat, dataset, dossier)
-    return contrat
-
-
-# ---------------------------------------------------------------------------
-# Affichage — ce que l'humain doit avoir sous les yeux
-# ---------------------------------------------------------------------------
-
-
+# ⭐ `approuver()` vit désormais dans `agent/contracts/validation.py` : l'écran
+# « Contrats » de Streamlit la partage (phase 6.2). Une seconde voie de
+# validation serait une seconde façon de contourner `--accept-warnings`, et la
+# critique de la découverte deviendrait décorative.
 def afficher_decouverte(comptes_rendus: list[dict]) -> None:
     for rendu in comptes_rendus:
         if rendu["error"]:
@@ -173,13 +127,17 @@ def afficher_etat(dataset: str, dossier=CONTRACTS_DIR) -> None:
 
     for contrat in contrats:
         marque = "✅" if contrat["status"] == APPROUVE else "⏸ "
-        print(f"  {marque} {contrat['table']}  v{contrat['version']}  {contrat['status']}")
+        print(
+            f"  {marque} {contrat['table']}  v{contrat['version']}  {contrat['status']}"
+        )
 
     attente = [c for c in contrats if c["status"] == PROPOSE]
     if attente:
         print(f"\n{len(attente)} contrat(s) en attente de validation.")
         print("Relisez le fichier, ajustez les bornes, puis :")
-        print(f"  uv run python -m scripts.discover {dataset} --approve <TABLE> --by <nom>")
+        print(
+            f"  uv run python -m scripts.discover {dataset} --approve <TABLE> --by <nom>"
+        )
 
 
 def main() -> int:
@@ -189,8 +147,12 @@ def main() -> int:
     parseur.add_argument("dataset", help="nom d'un registre `datasets/<nom>.yaml`")
     parseur.add_argument("--table", help="ne découvrir que cette table")
     parseur.add_argument("--list", action="store_true", help="où en est chaque contrat")
-    parseur.add_argument("--approve", metavar="TABLE", help="valider le contrat d'une table")
-    parseur.add_argument("--by", default="", help="qui signe (obligatoire pour --approve)")
+    parseur.add_argument(
+        "--approve", metavar="TABLE", help="valider le contrat d'une table"
+    )
+    parseur.add_argument(
+        "--by", default="", help="qui signe (obligatoire pour --approve)"
+    )
     parseur.add_argument(
         "--accept-warnings",
         action="store_true",
