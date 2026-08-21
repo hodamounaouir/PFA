@@ -52,6 +52,21 @@ from agent.state import (  # noqa: E402
 
 DATASET = "olist"
 
+# ⭐ Les noms d'écrans sont des **constantes**, pas des chaînes recopiées.
+#
+# Écrit après s'être fait prendre : l'accueil renvoyait vers « l'onglet
+# Contrats » alors que l'écran s'appelait « Règles » depuis la refonte. Le
+# lecteur cherchait un onglet qui n'existait plus — et rien ne pouvait le
+# signaler, puisque les deux chaînes vivaient à deux endroits.
+#
+# Un test vérifie désormais que tout écran cité dans un message existe.
+ACCUEIL = "🏠 Accueil"
+DECISIONS = "✅ Décisions"
+REGLES = "📜 Règles"
+DONNEES = "📊 Vos données"
+HISTORIQUE = "📚 Historique"
+ALERTES = "🔕 Alertes désactivées"
+
 st.set_page_config(page_title="Qualité des données", page_icon="🔎", layout="wide")
 
 
@@ -115,7 +130,7 @@ def accueil() -> None:
         if etat["decisions_en_attente"]:
             st.warning(
                 f"**{etat['decisions_en_attente']} anomalie(s)** attendent votre "
-                f"décision → onglet **Décisions**"
+                f"décision → onglet **{DECISIONS}**"
             )
             for p in etat["attente"][:5]:
                 st.markdown(
@@ -124,7 +139,7 @@ def accueil() -> None:
         if etat["contrats_a_signer"]:
             st.info(
                 f"**{etat['contrats_a_signer']} règle(s)** proposées par l'agent "
-                f"attendent votre relecture → onglet **Contrats**"
+                f"attendent votre relecture → onglet **{REGLES}**"
             )
 
     if etat["erreurs"]:
@@ -483,12 +498,12 @@ def alertes_desactivees() -> None:
 
 
 ECRANS = {
-    "🏠 Accueil": accueil,
-    "✅ Décisions": decisions,
-    "📜 Règles": contrats,
-    "📊 Vos données": tableaux,
-    "📚 Historique": historique,
-    "🔕 Alertes désactivées": alertes_desactivees,
+    ACCUEIL: accueil,
+    DECISIONS: decisions,
+    REGLES: contrats,
+    DONNEES: tableaux,
+    HISTORIQUE: historique,
+    ALERTES: alertes_desactivees,
 }
 
 

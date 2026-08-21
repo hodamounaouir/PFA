@@ -472,3 +472,30 @@ def test_quand_il_n_y_a_rien_a_faire_l_accueil_le_dit(app, monkeypatch):
     )
     at = ouvrir(app, "🏠 Accueil")
     assert any("Rien à décider" in s.value for s in at.success)
+
+
+def test_tout_ecran_cite_dans_un_message_existe(app):
+    """⭐ Le garde-fou contre une orientation qui ment.
+
+    L'accueil renvoie vers d'autres onglets (« → onglet **Règles** »). Si un
+    écran est renommé sans que le message suive, le lecteur cherche un onglet
+    **qui n'existe pas** — et rien ne le signale, puisque les deux chaînes
+    vivraient à deux endroits.
+
+    C'est arrivé : après la refonte, l'accueil pointait encore vers « Contrats »
+    alors que l'écran s'appelait « Règles ». Les noms sont désormais des
+    constantes, et ce test vérifie que tout onglet cité est atteignable.
+    """
+    import re
+
+    app_mod = __import__("app")
+    at = ouvrir(app, "🏠 Accueil")
+
+    textes = [w.value for w in at.warning] + [i.value for i in at.info]
+    cites = set()
+    for texte in textes:
+        cites.update(re.findall(r"onglet \*\*(.+?)\*\*", texte))
+
+    assert cites, "l'accueil doit orienter vers les écrans d'action"
+    for onglet in cites:
+        assert onglet in app_mod.ECRANS, f"onglet cité mais introuvable : {onglet!r}"
