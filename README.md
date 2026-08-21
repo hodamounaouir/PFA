@@ -14,11 +14,16 @@ validation humaine explicite**, et chaque incident laisse une **trace complète*
 
 ## 🚧 Statut
 
-**Phase 0/9 — Fondations & accès.** Le projet est en cours d'amorçage.
+**Phases 0 → 6 livrées côté code · arrêt provisoire à la 6** *(2026-08-21)*. Le pipeline, l'agent, le
+HITL complet et les six écrans Streamlit existent et sont couverts par **710 tests verts**.
 
-Ce README décrit la **cible**. Les commandes ci-dessous ne sont pas toutes opérationnelles aujourd'hui —
-voir [Avancement](#avancement) pour ce qui existe réellement. Le contrat fonctionnel fait foi :
-[`CAHIER_DES_CHARGES.md`](CAHIER_DES_CHARGES.md) (v4).
+Ce qui reste avant que la phase 6 soit formellement close **ne s'écrit pas, cela s'exécute** : le DAG à
+11 tâches, le rejeu de la fenêtre avec injections, les trois scénarios bout en bout et l'enchaînement
+de la démo — tous demandent Snowflake et Airflow actifs. Le détail est dans
+[`PROGRESS.md`](PROGRESS.md#-arrêt-provisoire-à-la-fin-de-la-phase-6-décidé-le-2026-08-21).
+
+Les phases 8 (benchmark) et 9 (soutenance) restent à faire ; la 7 (cause racine) est en pause.
+Le contrat fonctionnel fait foi : [`CAHIER_DES_CHARGES.md`](CAHIER_DES_CHARGES.md) (v4).
 
 ---
 
@@ -167,28 +172,45 @@ Détail complet : [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ### Installation
 
 ```bash
-git clone <repo>
-cd projet_hoda
+git clone https://github.com/hodamounaouir/PFA.git
+cd PFA
 
-make setup                 # environnement Python + dépendances figées
-cp .env.example .env       # puis renseigner les secrets
+make setup                 # uv sync + crée .env depuis .env.example s'il manque
 ```
+
+Puis remplis `.env` (identifiants `SNOWFLAKE_*`, `GROQ_API_KEY`).
+
+> ⚠️ **Enregistre `.env` en LF, pas en CRLF.** Sous Windows, un `\r` parasite se glisse dans les
+> valeurs Snowflake et la connexion échoue avec une erreur qui ne dit pas pourquoi.
+> VS Code : coin bas-droit → `CRLF` → `LF` → sauvegarde.
 
 ### Vérifier les accès
 
 Avant toute chose — cette commande dit en une exécution si l'environnement est utilisable :
 
 ```bash
-python scripts/check_access.py
+uv run python scripts/check_access.py
 # ✅ Snowflake  ✅ LLM (Groq)
+```
+
+Puis créer la base et ses quatre schémas — **idempotent**, il se relance sans risque (ADR 001 : c'est
+ce qui permet de repartir d'un trial neuf sans rien faire à la main dans la console) :
+
+```bash
+uv run python scripts/setup_snowflake.py
+# 🎉 Base DATA_QUALITY prête — RAW · STAGING · MARTS · OPS
 ```
 
 ### Préparer le jeu de données (hybride : réel + injection)
 
 ```bash
-kaggle datasets download olistbr/brazilian-ecommerce -p data/olist   # dataset réel (~100k commandes)
-python -m data.replay --from 2017-03-01 --to 2017-05-29 --seed 42    # rejeu jour par jour + injection
+kaggle datasets download olistbr/brazilian-ecommerce -p data/olist --unzip   # ~100k commandes
+uv run python -m data.replay --from 2018-03-01 --to 2018-05-31 --seed 42     # 92 jours, 1 jour = 1 batch
 ```
+
+> La fenêtre `2018-03-01 → 2018-05-31` est **figée** dans [`data/config.py`](data/config.py) : c'est le
+> plateau stable du dataset, et le `ground_truth.yaml` y est indexé. Un jour hors fenêtre est refusé.
+> `data/olist/` n'est pas versionné — les CSV Kaggle sont à copier à la main sur chaque machine.
 
 Rejoue le dataset **réel** Olist un jour à la fois, en y injectant des anomalies contrôlées et
 documentées dans `data/ground_truth.yaml` — la vérité terrain contre laquelle le benchmark est calculé.
@@ -196,19 +218,60 @@ Le fil rouge sémantique (`sao paulo`/`são paulo`), lui, est déjà dans les do
 
 ### Lancer le pipeline
 
-```bash
-# Pipeline seul (baseline : dbt tests statiques, sans IA)
-airflow dags trigger medallion_pipeline
+Le cycle **Découverte** tourne une fois par table, avant toute surveillance : il profile la base et
+propose un contrat par table. Les 17 contrats d'Olist sont déjà versionnés dans `contracts/olist/` —
+mais tous en `status: proposed`.
 
-# Pipeline + agent qualité
-airflow dags trigger medallion_pipeline --conf '{"agent_enabled": true}'
+```bash
+uv run python -m scripts.discover olist --list                        # où en est chaque contrat
+uv run python -m scripts.discover olist --approve RAW.CUSTOMERS --by <ton-nom>
+```
+
+> ⚠️ **Un contrat `proposed` ne gouverne rien.** `loader.charger()` ne le rend jamais : tant qu'il
+> n'est pas signé, aucune de ses clauses ne sert à la détection. Ce n'est pas un oubli, c'est P3 — la
+> machine propose, l'humain signe. Le fil rouge São Paulo n'en dépend pas (la famille sémantique lit le
+> **rôle du profil**, pas le contrat), mais les familles `contrat` (nulls J60, doublons J75) restent
+> muettes tant que rien n'est approuvé.
+
+Ensuite, le pipeline. Airflow orchestre **tout** — depuis la phase 4.5 le DAG compte 11 tâches et
+l'agent y tourne après chaque couche, sans option à passer :
+
+```bash
+cd airflow
+docker compose up -d                       # UI : http://localhost:8080 — airflow / airflow
+```
+
+Puis le backfill de la fenêtre — la procédure complète, les deux options et les pièges sont dans
+[`airflow/README.md`](airflow/README.md).
+
+L'agent seul, **sans Docker**, sur une couche et un jour :
+
+```bash
+uv run python -m scripts.check_layer olist gold --day 2018-05-14
+```
+
+> Une tâche `check_*` **verte ne veut pas dire « rien trouvé »** : le code de sortie répond à
+> *l'agent a-t-il pu tourner ?*, pas à *qu'a-t-il trouvé ?* — ça se lit dans `OPS.INCIDENTS`. Une
+> proposition en attente est le fonctionnement normal.
+
+Reprendre un run mis en pause, en ligne de commande (le `thread_id` est `<dataset>|<table>|<jour>`) :
+
+```bash
+uv run python -m scripts.decide --list
+uv run python -m scripts.decide "olist|RAW.CUSTOMERS|2018-05-14" approve --by <ton-nom>
 ```
 
 ### Ouvrir l'observabilité et la validation
 
 ```bash
-streamlit run streamlit/app.py
+uv run streamlit run streamlit/app.py
 ```
+
+Six écrans : **📊 Dashboard BI · 📋 Incidents · 🔍 Décision · ✅ Validation HITL · 🔇 Signatures en
+silence · 📜 Contrats**. Le bouton *Approuver* reprend réellement le graphe en pause — il passe par
+[`agent/hitl.py`](agent/hitl.py), exactement le même code que `scripts/decide.py`.
+
+Le déroulé de la démonstration, écran par écran, est le runbook [`docs/DEMO.md`](docs/DEMO.md).
 
 ---
 
@@ -241,7 +304,7 @@ airflow/dags/       # DAGs d'orchestration
 streamlit/          # UI : dashboard BI, incidents, validation HITL
 data/               # rejeu Olist + injecteur d'anomalies + ground_truth.yaml
 benchmarks/         # résultats baseline vs agent
-scripts/            # utilitaires (check_access)
+scripts/            # check_access · setup_snowflake · discover · check_layer · decide
 tests/              # tests unitaires (LLM mocké) + les 3 tests de preuve
 docs/
   ├── ARCHITECTURE.md
@@ -293,15 +356,20 @@ Le détail étape par étape est dans [`PROGRESS.md`](PROGRESS.md) — ce tablea
 | 0 | Fondations & accès | ✅ 2026-07-21 |
 | 1 | Dataset hybride : Olist rejoué + anomalies injectées | ✅ 2026-07-21 |
 | 2 | Pipeline Medallion sans agent (baseline) | ✅ 2026-07-27 — 92 runs Airflow verts, baseline figée |
-| 3 | Squelette agent LangGraph (8 nœuds, pause/reprise) | 🚧 en cours |
-| 4 | Socle générique + agent réel + `INCIDENTS` (mémoire) | ⬜ |
-| 5 | HITL complet : `interrupt`, reprise, `Apply` borné | ⬜ |
-| 6 | Observabilité Streamlit | ⬜ |
-| 7 | 🌟 Cause racine (lineage) + extensions (RAG, GitHub/MCP, CI, streaming) | ⬜ |
-| 8 | Benchmark chiffré | ⬜ |
-| 9 | Documentation, ADR, soutenance | ⬜ |
+| 3 | Squelette agent LangGraph (8 nœuds, pause/reprise) | ✅ 2026-08-03 |
+| 4 | Socle générique + agent réel + `INCIDENTS` (mémoire) | ✅ 2026-08-17 — ⏳ 4.5 / 4.6 restent à exécuter |
+| 5 | HITL complet : `interrupt`, reprise, `Apply` borné | ✅ 2026-08-17 — ⏳ 5.5 reste à exécuter |
+| 6 | Observabilité Streamlit (6 écrans) | ✅ 2026-08-21 — ⏳ la démo reste à jouer |
+| 7 | 🌟 Cause racine (lineage) + extensions (RAG, GitHub/MCP, CI, streaming) | ⏸️ en pause |
+| 8 | Benchmark chiffré | ⏸️ à la reprise |
+| 9 | Documentation, ADR, soutenance | ⏸️ à la reprise |
 
-**Point de bascule** : à la fin de la phase 6, le projet est *soutenable*. La phase 7 est du bonus.
+⏳ = écrit et couvert par les tests, mais **jamais exécuté** contre Snowflake et Airflow réels. La
+distinction est volontaire : un test vert prouve que le code fait ce qu'on croit, pas que la chaîne
+complète tourne.
+
+**Point de bascule** : à la fin de la phase 6, le projet est *soutenable*. La phase 7 est du bonus —
+les 8 et 9, non.
 
 ---
 

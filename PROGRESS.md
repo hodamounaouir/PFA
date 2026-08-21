@@ -42,14 +42,36 @@ Changer de dataset = écrire un nouveau `datasets/<nom>.yaml` et refaire le benc
 | 1 | Dataset hybride : Olist + rejeu + injection | 1–1,5 sem | ✅ terminé le 2026-07-21 · §1.5 ajoutée le 2026-08-04 |
 | 2 | Pipeline Medallion sans agent (baseline) | 2–3 sem | ✅ terminé le 2026-07-27 |
 | 3 | Squelette agent LangGraph (8 nœuds) | 1–2 sem | ✅ terminé le 2026-08-03 |
-| 4 | Socle générique + agent réel + `INCIDENTS` | 3 sem | ⬜ ⬅️ **prochaine** |
-| 5 | HITL complet : pause, reprise, Apply borné | 1–2 sem | ⬜ |
-| 6 | Observabilité & validation Streamlit | 1–2 sem | ⬜ |
-| 7 | 🌟 Cause racine (lineage) + extensions | 1–2 sem | ⬜ |
-| 8 | Benchmark chiffré | 1–2 sem | ⬜ |
-| 9 | Documentation, ADR, soutenance | 1 sem | ⬜ |
+| 4 | Socle générique + agent réel + `INCIDENTS` | 3 sem | ✅ code terminé le 2026-08-17 · ⏳ 4.5 / 4.6 sur le PC |
+| 5 | HITL complet : pause, reprise, Apply borné | 1–2 sem | ✅ code terminé le 2026-08-17 · ⏳ 5.5 sur le PC |
+| 6 | Observabilité & validation Streamlit | 1–2 sem | ✅ code terminé le 2026-08-21 · ⏳ démo sur le PC |
+| 7 | 🌟 Cause racine (lineage) + extensions | 1–2 sem | ⏸️ hors périmètre — arrêt provisoire à la 6 |
+| 8 | Benchmark chiffré | 1–2 sem | ⏸️ à la reprise |
+| 9 | Documentation, ADR, soutenance | 1 sem | ⏸️ à la reprise |
 
-Légende : ⬜ pas commencé · 🚧 en cours · ✅ terminé · ⏭️ sacrifié (extensions uniquement)
+Légende : ⬜ pas commencé · 🚧 en cours · ✅ terminé · ⏳ écrit et testé, reste à exécuter sur le PC ·
+⏸️ mis en pause (décision de périmètre) · ⏭️ sacrifié (extensions uniquement)
+
+### ⏸️ Arrêt provisoire à la fin de la phase 6 *(décidé le 2026-08-21)*
+
+Le **point de bascule** de la roadmap est atteint côté code : pipeline Medallion + agent générique +
+HITL complet + les six écrans, **710 tests verts, 4 ignorés**. On s'arrête ici pour l'instant.
+
+Ce qui reste avant que la phase 6 soit *formellement* close ne s'écrit pas — cela **s'exécute sur le
+PC**, Snowflake et Airflow actifs. C'est le même paquet depuis le 2026-08-17, et il tient en une
+séance :
+
+| # | Ce qui reste | Pourquoi ça n'a pas pu se faire ici |
+|---|---|---|
+| 4.5 | Le DAG à **11 tâches** n'a jamais tourné ; ≥ 3 règles dbt générées à réintégrer **vertes** | Airflow n'est pas une dépendance du projet — l'import du DAG n'est pas vérifiable hors machine |
+| 4.6 | Rejeu de la fenêtre avec injections : J45 · J60 · J75 · J80, la récidive **J85 citant J60**, et ⭐ le cluster `sao paulo` | Demande Snowflake peuplé et un vrai appel LLM |
+| 5.5 | Les **trois scénarios** bout en bout : approbation · refus · amendement | idem |
+| 6.2 | L'**enchaînement des six écrans à la souris** — runbook [`docs/DEMO.md`](docs/DEMO.md) | Les écrans sont testés isolément (`AppTest`), leur enchaînement ne l'est pas |
+
+**Ce que l'arrêt ne dit pas** : les phases **8 (benchmark) et 9 (soutenance) restent bloquantes** dans
+la roadmap. S'arrêter à la 6 est une **pause**, pas une fin de projet — sans le benchmark, le travail
+reste une démo technique. Seule la **phase 7** était déjà déclarée coupable ; c'est la seule dont
+l'abandon serait sans coût.
 
 ---
 
@@ -1146,8 +1168,10 @@ s'agit de 80,00 € en centimes, d'une faute de frappe, ou d'une vraie grosse co
       propose jamais « remplacer par la bonne valeur », et n'a pas à le redemander.
 
 ### 5.3 Reprise, Apply borné, Amend
-- [ ] Injection de la décision : `approved` / `amend_contract` / `rejected` + **identité du décideur +
-      horodatage** → stockés dans `INCIDENTS`
+- [x] Injection de la décision : `approved` / `amend_contract` / `rejected` + **identité du décideur +
+      horodatage** → stockés dans `INCIDENTS` *(case cochée le 2026-08-21 après relecture)* — la voie
+      unique est `agent/hitl.py` (6.1), `propose` horodate en UTC et `log` écrit `decided_by` /
+      `decided_at` ; les trois boutons Streamlit restent **désactivés** tant que le nom est vide (6.2).
 - [x] `apply` réel *(2026-08-17)* : transaction SQL ; vérifications **même après approbation** :
   - [x] la requête ne touche que la table diagnostiquée
   - [x] rejet des mots-clés destructeurs (`DROP`, `TRUNCATE`, `DELETE` sans `WHERE`…)
@@ -1194,9 +1218,12 @@ s'agit de 80,00 € en centimes, d'une faute de frappe, ou d'une vraie grosse co
         donc plus modifier.
   - [x] ⚠️ **Le numéro de version est un entier**, comme dans le fichier (4.2.4). Les `"v1"` qui
         traînaient dans l'état dataient du stub de la phase 3, quand rien ne relisait un vrai contrat.
-- [ ] Distinguer les deux « non » dans l'UI et dans `INCIDENTS` :
+- [x] Distinguer les deux « non » dans l'UI et dans `INCIDENTS` *(case cochée le 2026-08-21 après
+      relecture)* :
       *« c'est normal et ça le restera »* → `amend_contract` (permanent) ·
       *« exceptionnel, rien à changer »* → `rejected` (silence par signature)
+      — deux boutons distincts en 6.1, deux valeurs distinctes de `human_decision`, et l'écran
+      **Signatures en silence** n'existe que parce que le second est réversible.
 - [x] `validate` réel *(2026-08-17)* : re-profilage → la métrique anormale est-elle revenue dans la
       normale ? échec → `validation_status = "failed_manual_review"`, **pas de re-tentative
       automatique**
@@ -1443,3 +1470,4 @@ dans le temps imparti, testée en conditions réelles.
 | 2026-08-17 | 5 | ✅ **5.4 — les cinq preuves rassemblées** : `tests/test_preuves.py`, un fichier écrit pour être **lu**. **+14 tests, 673 verts.** 5 sabotages joués, **5/5 détectés**. | **Un troisième angle, et non une redite.** La méthode de 3.4 établit chaque preuve deux fois — *topologiquement* (l'inspection du graphe compilé, qui vaut pour toute exécution y compris celles auxquelles on n'a pas pensé) et *dynamiquement* (une exécution réelle sur des décisions hostiles). Ce fichier ajoute le **bout-en-bout** : les garanties tiennent-elles quand tout est branché ensemble ? C'est ce qui casserait en premier si une phase ultérieure défaisait l'une d'elles sans s'en apercevoir — et c'est ce qu'on montre à un jury, qui n'ira pas lire trois fichiers de tests unitaires. **Choix assumé : rassembler sans déplacer.** Déménager les preuves existantes aurait donné une seule source, mais le projet s'est déjà fait prendre par là (« *un refactor déplace le code, pas la couverture* », 4.2.1). On ajoute un angle, on ne touche pas aux deux autres. **La seule preuve réellement manquante était P7** — « amend n'écrit pas » — et elle est vérifiée **par comptage avant/après**, pas par inspection de l'état : ce qui compte n'est pas qu'`amend` *déclare* ne rien écrire, mais qu'aucune ligne n'ait bougé. **Éprouvées par mutation, et c'est ici que ça compte le plus** : une preuve qui ne peut pas échouer ne prouve rien, et celle-là serait montrée à un jury. Les cinq sabotages sont détectés — défaut de l'aiguillage vers `apply` (3 échecs), garde-fou P6 retiré (1), checkpointer neutralisé (1), bornes d'`apply` sautées (4), `amend` qui écrit aussi dans les données (2). **⚠️ 5ᵉ occurrence du piège de la réexportation**, et PROGRESS demandait de le reconsidérer à celle-là. Fait : **conservé**. Le supprimer demanderait de renommer les huit fonctions de nœuds ou de casser `from agent.nodes import …` dans `graph.py` et la moitié des tests, pour un défaut qui coûte une minute à qui a lu l'avertissement. Ce qui change, c'est que l'avertissement vit désormais **dans `agent/nodes/__init__.py`**, à l'endroit où on le cherche — et plus seulement dans les fichiers qui s'y étaient fait prendre. *Une décision reconsidérée et maintenue n'est plus une dérive.* |
 | 2026-08-21 | 6 | ✅ **6.1 — les six écrans** : `agent/hitl.py` (voie unique de reprise), `streamlit/donnees.py` (toute la logique), `streamlit/app.py` (l'affichage seul), `lire_journal()`. **+21 tests, 694 verts.** 7 sabotages joués : **5/7 au premier tour**, 7/7 après correction. | **⭐ La décision de structure : `agent/hitl.py`, la voie UNIQUE de reprise.** `scripts/decide.py` enfermait l'injection de décision dans son `main()`, entre un `argparse` et des `print` — Streamlit ne pouvait pas la réutiliser. La réécrire côté bouton aurait été une **seconde façon de contourner P3** : la garantie « aucun chemin n'atteint `apply` sans approbation » n'aurait plus valu que pour les chemins testés. Elle est donc extraite, et les deux interfaces l'appellent. Un test relit `donnees.py` pour vérifier qu'aucun `Command(resume=…)` « pratique » n'y est apparu. **Le module ne parle à personne** — aucun `print`, aucun composant : il rend des dictionnaires, et une **erreur est une donnée**. Le `code` accompagne la phrase parce que les deux interfaces n'ont pas le même vocabulaire : le terminal dit « utilisez `--fix` », le navigateur **désactive un bouton** avant même le clic. *Apprendre un refus après coup n'apprend rien.* **⭐ Le journal n'est pas la mémoire.** `lire_incidents` filtre aux décisions humaines (R5) parce que c'est ce que l'agent relit — lui donner ses propres hypothèses le ferait tourner en rond. `lire_journal` ne filtre rien parce que c'est ce qu'un humain relit : un run sans anomalie, sans décision, refusé, y figurent tous. Les cacher donnerait un historique **plus propre que la réalité**, et c'est là qu'on regarde pour savoir ce que l'agent a fait cette nuit. **Même partage que pour Airflow** : toute la logique dans `donnees.py`, l'affichage seul dans `app.py` — *une logique enfermée dans un `st.button()` n'est éprouvable qu'à la main*. **⚠️ Collision de noms** : le dossier `streamlit/` porte le nom du paquet installé, donc `from streamlit import donnees` résout vers `site-packages`. L'erreur serait tombée **à l'exécution de l'app**, pas au chargement des tests — le pire endroit. On importe le module nu, comme `streamlit run` le fait. **Leçon de méthode — deux tests qui ne pouvaient pas échouer.** (1) Mon test « une signature malformée n'efface pas l'écran » utilisait `"cassée"` — or `split("|")` n'échoue pas dessus, le `except` n'était jamais atteint, et le sabotage passait. Il faut une valeur qui **casse vraiment** (non-chaîne), telle que la base peut en rendre si le JSON a mal tourné. (2) Rien ne testait l'injection sur un fil **sans pause en cours** : le sabotage retirant la vérification était invisible, alors que le comportement saboté relancerait le graphe depuis le début et ferait croire à l'humain qu'il a tranché une proposition disparue. *Deux fois le même motif : un garde-fou dont le chemin d'échec n'est jamais emprunté par les tests est du poids mort.* |
 | 2026-08-21 | 6 | ✅ **6.2 — le clic est prouvé, pas supposé** : `tests/test_streamlit_app.py` (16 tests via `streamlit.testing.v1.AppTest`) + le runbook `docs/DEMO.md`. **+16 tests, 710 verts.** 7 sabotages joués : **5/7 au premier tour**, 7/7 après correction. | **⭐ Streamlit s'exécute sans navigateur, et ça change la nature de la promesse.** 6.2 demandait « une seule voie de reprise, **testée** » — `AppTest` permet de cliquer pour de vrai et de vérifier *qui* a été appelé, au lieu de s'en remettre à la lecture du code. Le sabotage décisif : un bouton qui court-circuite `agent/hitl.py` pour injecter lui-même un `Command(resume=…)`. C'est exactement la seconde voie de reprise que 6.1 existait pour empêcher — donc une seconde façon de contourner P3 — et **personne ne l'aurait vue avant la démo**. Elle est détectée. **Le partage logique/affichage se paie ici** : `donnees.py` est éprouvé sur ce qu'il calcule, `app.py` sur son **câblage** — les écrans se rendent, les boutons appellent la bonne fonction avec les bons arguments, les garde-fous d'interface sont réellement posés. *Un nœud parfait relié au mauvais endroit ne protège de rien* — la même raison qui avait fait écrire `test_agent_graph.py` à côté de `test_agent_nodes.py`. **`decided_by` est un garde-fou, pas un champ** : les trois boutons restent **désactivés** tant que le nom est vide. Refuser après le clic n'apprendrait rien, et une décision sans auteur ne se conteste pas six mois plus tard. **Leçon de méthode — le garde-fou d'écran était du poids mort.** Chaque vue attrape ses exceptions pour qu'une panne (table absente, trial expiré, JSON corrompu) n'efface pas l'application entière. Mais **aucun test ne faisait échouer une source** : retirer les `try/except` laissait la suite verte. Troisième occurrence du même motif après 4.2.5 et 6.1 — *un garde-fou dont le chemin d'échec n'est jamais emprunté par les tests n'existe que dans le code, pas dans les faits.* **Reste à jouer** : l'enchaînement complet des six écrans avec Snowflake actif. Les écrans sont testés isolément, leur enchaînement ne l'est pas, et le runbook le dit plutôt que de le laisser croire. |
+| 2026-08-21 | 6 → ⏸️ | ⏸️ **Arrêt provisoire décidé à la fin de la phase 6.** Tableau de bord remis au vrai (il annonçait encore « phase 4 ⬅️ prochaine » alors que six commits de phases 4, 5 et 6 étaient passés) ; deux cases de 5.3 cochées après relecture du code — l'injection de décision horodatée et la distinction des deux « non » étaient faites depuis 6.1/6.2, seule la case manquait. Suite vérifiée : **710 verts, 4 ignorés**. | **Le point de bascule est atteint, la fin du projet non — et il ne faut pas confondre les deux.** La roadmap promet qu'à la fin de la 6 le projet est *soutenable* : pipeline + agent + HITL + démo à la souris. C'est vrai **côté code**. Ce qui reste est d'une autre nature : quatre lots (4.5, 4.6, 5.5, 6.2) qui ne s'écrivent pas mais **s'exécutent** — Snowflake peuplé, Airflow levé, un vrai appel LLM. Les regrouper en une séance était déjà la décision du 2026-08-17 ; l'arrêt ne les annule pas, il les isole. **Ce que la pause coûte, dit honnêtement** : la 7 était déclarée coupable par la roadmap, l'abandonner ne coûte rien ; mais les phases **8 et 9 restent bloquantes** — sans benchmark chiffré contre `ground_truth.yaml`, le travail reste une démo technique plutôt qu'une contribution mesurée. Le tableau de bord le dit désormais en toutes lettres (⏸️ *à la reprise*, pas ⏭️ *sacrifié*) : un statut qui laisserait croire à un projet fini serait la seule façon de perdre vraiment quelque chose ici. |
