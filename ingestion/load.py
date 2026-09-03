@@ -8,8 +8,9 @@ Bronze = la couche brute. On y dépose les données **telles quelles**, sans jug
   - **idempotent** : recharger le même batch ne duplique rien (on efface d'abord
     les lignes de ce `_batch_id`, puis on réinsère) ;
   - le schéma observé de chaque table est capturé dans `OPS._SCHEMA_HISTORY`
-    (une ligne par colonne) — c'est ce que lira `read_schema_history` en phase 4
-    pour repérer une dérive (ex. le renommage payment_value→amount au J45).
+    (une ligne par colonne, **les trois colonnes techniques comprises**) — c'est
+    ce que lira `read_schema_history` en phase 4 pour repérer une dérive (ex. le
+    renommage payment_value→amount au J45).
 
 Le VARCHAR partout est volontaire : si une colonne change de nom ou apparaît,
 l'ingestion ne casse pas — elle ajoute la colonne et continue. C'est le rôle de
@@ -98,14 +99,38 @@ def ensure_bronze_table(cur, table: str, columns: list[str]) -> None:
         )
 
 
+def schema_observe(columns: list[str]) -> list[str]:
+    """Le schéma réel d'une table Bronze : les colonnes techniques, puis le lot.
+
+    ⭐ Les trois métadonnées en font **partie** : `ensure_bronze_table` les crée
+    sur toute table Bronze, `_ingested_at` n'étant même jamais dans le CSV
+    (c'est un `DEFAULT` posé par Snowflake). Le registre les omettait, alors
+    qu'`INFORMATION_SCHEMA` — ce que lit le profil de l'agent — les rend
+    toujours : la dérive de schéma comparait donc deux inventaires qui ne
+    parlaient pas de la même table, et rapportait trois colonnes « nouvelles »
+    à chaque run et sur chaque table Bronze.
+
+    L'ordre est celui du `CREATE TABLE`, pour qu'`ordinal_position` dise ici la
+    même chose que dans `INFORMATION_SCHEMA`.
+    """
+    return [META_BATCH, META_SOURCE, META_INGESTED] + list(columns)
+
+
 def record_schema(cur, batch_id: str, table: str, columns: list[str]) -> None:
-    """Journalise le schéma observé de la table pour ce batch (idempotent)."""
+    """Journalise le schéma observé de la table pour ce batch (idempotent).
+
+    `columns` est ce que le CSV apporte ; ce qui est journalisé est ce que la
+    table **a**, colonnes techniques comprises.
+    """
     cur.execute(
         f"DELETE FROM {OPS_SCHEMA}.{SCHEMA_HISTORY} "
         f"WHERE batch_id = %s AND table_name = %s",
         (batch_id, table),
     )
-    rows = [(batch_id, table, col, i) for i, col in enumerate(columns, start=1)]
+    rows = [
+        (batch_id, table, col, i)
+        for i, col in enumerate(schema_observe(columns), start=1)
+    ]
     cur.executemany(
         f"INSERT INTO {OPS_SCHEMA}.{SCHEMA_HISTORY} "
         f"(batch_id, table_name, column_name, ordinal_position) "
