@@ -17,6 +17,17 @@ a peut-être des semaines. Sur Bronze, une colonne ajoutée avant-hier et valid�
 depuis figure dans l'historique mais pas forcément dans un contrat plus ancien —
 comparer au contrat la signalerait comme nouvelle à chaque run.
 
+## Les colonnes techniques ne sont pas du schéma métier
+
+`ingestion/load.py` journalise le schéma **à partir du CSV**, donc avant d'avoir
+ajouté `_BATCH_ID`, `_SOURCE` et `_INGESTED_AT` (`_INGESTED_AT` n'y figure même
+jamais : c'est un `DEFAULT` posé par Snowflake). Le registre ne les contient donc
+jamais, la table les a toujours, et sans filtre la famille rapporterait trois
+colonnes « nouvelles » **à chaque run, sur chaque table Bronze**. L'écart est
+réel — les deux sources ne disent pas la même chose — mais il ne dit rien sur la
+qualité des données, et trois faux écarts permanents apprennent à ignorer les
+vrais.
+
 ## Un renommage n'est pas détecté ici
 
 Une colonne disparue **et** une colonne apparue le même jour, c'est très
@@ -28,6 +39,10 @@ de l'humain. Le partage est le même que pour les tables renommées, en 4.3
 
 from agent.detect import COHERENCE, SCHEMA, ecart
 
+# Le préfixe qui distingue les métadonnées de traçabilité de Bronze des colonnes
+# métier — la convention est posée par `ingestion/load.py` (phase 2.1).
+PREFIXE_TECHNIQUE = "_"
+
 
 def detecter(state: dict) -> list[dict]:
     """Les colonnes apparues et disparues depuis la dernière observation."""
@@ -35,7 +50,7 @@ def detecter(state: dict) -> list[dict]:
     if not profil:
         return []
 
-    aujourd_hui = set(profil.get("columns") or {})
+    aujourd_hui = _metier(profil.get("columns") or {})
     connues, origine = _reference(state)
     # Aucune référence : première observation de la table. Tout serait
     # « nouveau », ce qui n'apprendrait rien — on se tait plutôt que d'inonder
@@ -86,10 +101,22 @@ def _reference(state: dict) -> tuple[set, str]:
     """
     historique = state.get("schema_history") or []
     if historique:
-        return {c["name"] for c in historique if "name" in c}, "_SCHEMA_HISTORY"
+        return _metier(c["name"] for c in historique if "name" in c), "_SCHEMA_HISTORY"
 
     clauses = (state.get("contract") or {}).get("columns") or {}
     if clauses:
-        return set(clauses), "contrat"
+        return _metier(clauses), "contrat"
 
     return set(), "aucune"
+
+
+def _metier(colonnes) -> set:
+    """Les colonnes métier — les techniques sont de l'infrastructure, pas du schéma.
+
+    Filtré des **deux** côtés de la comparaison, et pas seulement du lot du jour :
+    une métadonnée qui disparaîtrait est un incident d'ingestion, pas une dérive
+    de schéma métier. Le filtre symétrique garde aussi la famille muette le jour
+    où le registre viendra à les contenir — corriger `record_schema()` ne doit pas
+    changer ce que cette famille rapporte.
+    """
+    return {c for c in colonnes if not c.startswith(PREFIXE_TECHNIQUE)}

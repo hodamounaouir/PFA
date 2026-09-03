@@ -183,6 +183,46 @@ def test_le_contrat_sert_de_repli_hors_bronze():
     assert ecarts[0]["reference"] == "contrat"
 
 
+def test_les_colonnes_techniques_ne_sont_pas_une_derive():
+    """⭐ Le faux positif permanent : trois colonnes, chaque run, chaque table Bronze.
+
+    `ingestion/load.py` journalise le schéma **avant** d'ajouter `_BATCH_ID` et
+    `_SOURCE`, et `_INGESTED_AT` n'est même pas dans le CSV — le registre ne les
+    contient jamais, alors que le profil, lu dans `INFORMATION_SCHEMA`, les a
+    toujours. Sans filtre, l'écran « Décisions » ouvre sur trois écarts qui ne
+    disent rien de la qualité des données.
+    """
+    ecarts = schema.detecter(
+        etat(
+            schema_history=[{"name": "GEOLOCATION_CITY"}],
+            profile=profil(
+                {
+                    "GEOLOCATION_CITY": {},
+                    "_BATCH_ID": {},
+                    "_SOURCE": {},
+                    "_INGESTED_AT": {},
+                }
+            ),
+        )
+    )
+    assert ecarts == []
+
+
+def test_le_filtre_technique_ne_masque_pas_une_vraie_derive():
+    """Le risque symétrique : un filtre trop large rendrait la famille aveugle."""
+    ecarts = schema.detecter(
+        etat(
+            schema_history=[{"name": "PAYMENT_VALUE"}],
+            profile=profil({"AMOUNT": {}, "_BATCH_ID": {}}),
+        )
+    )
+    par_type = {e["type"]: e["colonne"] for e in ecarts}
+    assert par_type == {
+        "colonne_disparue": "PAYMENT_VALUE",
+        "colonne_nouvelle": "AMOUNT",
+    }
+
+
 def test_sans_reference_le_premier_run_ne_crie_pas():
     """Tout serait « nouveau » : un premier run noyé sous des faux écarts
     apprend à ignorer l'agent dès le jour un."""
