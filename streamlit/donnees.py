@@ -237,6 +237,33 @@ DAMA_LISIBLES = {
     "fraicheur": "des données en retard",
 }
 
+# Ce qui s'est passé, dit en français — **par type d'écart, pas par dimension
+# DAMA**. La dimension classe l'écart pour le rapport qualité ; elle ne dit pas
+# ce qui est arrivé. Une colonne apparue est de dimension « cohérence », ce qui
+# s'affichait « des écritures qui se contredisent sur « _BATCH_ID » » : une
+# phrase fausse, sur l'écran même où l'on décide.
+#
+# `{ou}` est la colonne, ou la table quand l'écart porte sur la table entière.
+# `{observe}` n'est utilisé que par les deux écarts d'inventaire dont le sujet
+# est la table *trouvée* et non la table surveillée.
+TYPES_LISIBLES = {
+    "table_absente": "la table « {ou} » est introuvable",
+    "table_non_declaree": "la table « {observe} » n'est déclarée nulle part",
+    "renommage_probable": (
+        "« {observe} » porte exactement les colonnes de « {ou} », qui a disparu"
+    ),
+    "colonne_disparue": "la colonne « {ou} » a disparu",
+    "colonne_nouvelle": "une colonne est apparue : « {ou} »",
+    "nulls_interdits": "des valeurs manquent sur « {ou} »",
+    "doublons": "des doublons sur « {ou} »",
+    "hors_bornes": "des valeurs hors des bornes admises sur « {ou} »",
+    "valeur_non_admise": "des valeurs inattendues sur « {ou} »",
+    "rupture_de_constante": "une mesure jusqu'ici stable a changé sur « {ou} »",
+    "derive_statistique": "une mesure s'écarte des lots précédents sur « {ou} »",
+    "collision_semantique": "deux façons d'écrire la même valeur sur « {ou} »",
+    "test_dbt_echoue": "un test de qualité échoue sur « {ou} »",
+}
+
 DECISIONS_LISIBLES = {
     "approved": "✅ corrigé",
     "amend_contract": "📝 règle ajustée",
@@ -294,15 +321,36 @@ def anomalie_lisible(anomalie: dict) -> str:
     On garde le **chiffre** et on traduit le reste : « des valeurs manquent »
     sans « 51 lignes » ne servirait à personne pour décider.
     """
-    quoi = DAMA_LISIBLES.get(anomalie.get("dama"), anomalie.get("type"))
     ou = anomalie.get("colonne") or anomalie.get("table") or ""
-    observe = anomalie.get("observe")
-    combien = ""
-    if isinstance(observe, (int, float)) and not isinstance(observe, bool):
-        combien = f" — {observe}"
-    elif isinstance(observe, (list, tuple)) and observe:
-        combien = f" — {', '.join(str(v) for v in observe[:3])}"
-    return f"{quoi} sur « {ou} »{combien}"
+    modele = TYPES_LISIBLES.get(anomalie.get("type"))
+    if modele:
+        phrase = modele.format(ou=ou, observe=anomalie.get("observe"))
+    else:
+        # Une sixième famille ajoutée sans passer par ici : la dimension DAMA
+        # reste plus parlante que le nom technique du type, et l'écran continue
+        # de montrer quelque chose plutôt que de mentir ou de tomber.
+        quoi = DAMA_LISIBLES.get(anomalie.get("dama"), anomalie.get("type"))
+        phrase = f"{quoi} sur « {ou} »"
+
+    combien = _combien(anomalie)
+    if isinstance(combien, (int, float)) and not isinstance(combien, bool):
+        return f"{phrase} — {combien}"
+    if isinstance(combien, (list, tuple)) and combien:
+        return f"{phrase} — {', '.join(str(v) for v in combien[:3])}"
+    return phrase
+
+
+def _combien(anomalie: dict):
+    """Le chiffre qui compte pour cet écart — ce n'est pas toujours `observe`.
+
+    ⭐ Pour un écart `doublons`, `observe` est le nombre de valeurs **distinctes**.
+    L'afficher derrière « des doublons » ferait lire au métier l'inverse du
+    constat : « des doublons sur « ORDER_ID » — 3891 » là où 3891 est le nombre
+    de valeurs saines. Le décompte des doublons, lui, est dans les détails.
+    """
+    if anomalie.get("type") == "doublons":
+        return (anomalie.get("details") or {}).get("doublons")
+    return anomalie.get("observe")
 
 
 # ---------------------------------------------------------------------------
