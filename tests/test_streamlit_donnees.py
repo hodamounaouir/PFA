@@ -11,6 +11,7 @@ Le test qui compte est `test_le_journal_montre_AUSSI_les_runs_sans_anomalie` :
 un historique plus propre que la réalité est pire qu'un historique absent.
 """
 
+import ast
 import importlib
 import sys
 from pathlib import Path
@@ -201,6 +202,85 @@ def test_une_signature_malformee_n_efface_pas_l_ecran(memoire):
 def test_sans_refus_l_ecran_est_vide(memoire):
     memoire.incidents = [incident(human_decision=DECISION_APPROVED, signatures=["x"])]
     assert donnees.silences("olist") == []
+
+
+# ===========================================================================
+# Dire ce qui s'est passé, et non de quelle dimension il relève
+# ===========================================================================
+
+
+def ecart(**kw):
+    base = {"table": "RAW.GEOLOCATION", "colonne": None, "observe": None, "details": {}}
+    return base | kw
+
+
+def test_une_colonne_apparue_ne_se_dit_pas_une_contradiction():
+    """⭐ La phrase était fausse sur l'écran même où l'on décide.
+
+    L'écart est de dimension DAMA « cohérence », mais afficher la dimension
+    donnait « des écritures qui se contredisent sur « _BATCH_ID » » — un
+    diagnostic de contenu là où le constat porte sur la **structure**. Personne
+    ne peut trancher sur une phrase qui décrit autre chose que ce qui s'est
+    passé.
+    """
+    phrase = donnees.anomalie_lisible(
+        ecart(type="colonne_nouvelle", dama="coherence", colonne="_BATCH_ID",
+              observe="_BATCH_ID")
+    )
+    assert phrase == "une colonne est apparue : « _BATCH_ID »"
+
+
+def test_le_chiffre_des_doublons_n_est_pas_celui_des_valeurs_saines():
+    """`observe` porte le nombre de valeurs **distinctes** : « des doublons —
+    3891 » faisait lire l'inverse du constat. Le décompte est dans les détails."""
+    phrase = donnees.anomalie_lisible(
+        ecart(type="doublons", dama="unicite", colonne="ORDER_ID",
+              observe=3891, details={"doublons": 109})
+    )
+    assert phrase == "des doublons sur « ORDER_ID » — 109"
+
+
+def test_le_chiffre_reste_affiche_quand_il_veut_dire_quelque_chose():
+    """« des valeurs manquent » sans « 51 » ne sert à personne pour décider."""
+    assert donnees.anomalie_lisible(
+        ecart(type="nulls_interdits", dama="completude", colonne="CUSTOMER_ID",
+              observe=51)
+    ) == "des valeurs manquent sur « CUSTOMER_ID » — 51"
+
+
+def test_un_type_inconnu_retombe_sur_la_dimension():
+    """Une sixième famille ajoutée sans passer ici : l'écran montre encore
+    quelque chose de vrai, au lieu de tomber sur un `KeyError`."""
+    phrase = donnees.anomalie_lisible(
+        ecart(type="ce_qui_n_existe_pas_encore", dama="fraicheur", colonne="X")
+    )
+    assert phrase == "des données en retard sur « X »"
+
+
+def test_chaque_type_d_ecart_produit_par_l_agent_a_sa_phrase():
+    """⭐ Le test qui empêche le retour du problème.
+
+    Une famille de détection peut naître sans que personne pense à l'écran :
+    l'écart s'afficherait alors sous la dimension DAMA du voisin, c'est-à-dire
+    en disant autre chose que ce qui s'est passé. On lit donc les `type=` que
+    les familles produisent réellement, plutôt que d'en tenir une liste à jour
+    à la main — une liste recopiée ne prouve que sa propre recopie.
+    """
+    dossier = Path(donnees.__file__).resolve().parent.parent / "agent" / "detect"
+    produits = {
+        mot.value
+        for source in dossier.glob("*.py")
+        for noeud in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
+        if isinstance(noeud, ast.Call) and getattr(noeud.func, "id", "") == "ecart"
+        for mot in [
+            kw.value for kw in noeud.keywords
+            if kw.arg == "type" and isinstance(kw.value, ast.Constant)
+        ]
+    }
+    assert produits, "aucun type lu : le test ne prouverait plus rien"
+    assert produits <= set(donnees.TYPES_LISIBLES), (
+        f"sans phrase : {sorted(produits - set(donnees.TYPES_LISIBLES))}"
+    )
 
 
 # ===========================================================================
