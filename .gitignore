@@ -36,3 +36,9 @@ airflow/logs/
 
 # Divers
 .DS_Store
+
+# Documents internes du projet (non versionnés)
+**/PROGRESS.md
+**/CONTRIBUTING.md
+**/CAHIER_DES_CHARGES.md
+**/ROADMAP.md
