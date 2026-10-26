@@ -61,43 +61,29 @@ The validation workflow is enforced by the LangGraph execution flow rather than 
 
 ## Architecture
 
+## Architecture
+
+The platform follows a data pipeline architecture combining data ingestion, transformation, automated quality analysis, and human validation.
+
 ```mermaid
-flowchart TB
-    SRC["Olist Dataset<br/>Daily replay and controlled anomalies"]
-
-    subgraph PIPELINE["Apache Airflow Orchestration"]
-        B["Ingest to Bronze"]
-        C["Quality Check — Bronze"]
-        S["dbt Transform — Silver"]
-        D["Quality Check — Silver"]
-        G["dbt Transform — Gold"]
-        E["Quality Check — Gold"]
-
-        B --> C --> S --> D --> G --> E
-    end
-
-    subgraph SF["Snowflake Medallion Architecture"]
-        BR[("Bronze — Raw Data")]
-        SI[("Silver — Cleaned Data")]
-        GO[("Gold — Business Aggregates")]
-        INC[("Incident History")]
-
-        BR --> SI --> GO
-    end
-
-    AG["LangGraph Data Quality Agent<br/>Profile · Detect · Diagnose · Propose<br/>Human Approval · Apply · Validate · Log"]
-
-    UI["Streamlit Interface<br/>Dashboard · Incidents · Human Validation"]
-
-    SRC --> B
-    C -.-> AG
-    D -.-> AG
-    E -.-> AG
-    AG <--> SF
-    AG <--> UI
-    GO --> UI
-    INC --> UI
+flowchart TD
+    A["Olist Dataset"] --> B["Python Ingestion"]
+    B --> C["Snowflake Bronze"]
+    C --> D["dbt Transformations"]
+    D --> E["Snowflake Silver and Gold"]
+    E --> F["Data Quality Checks"]
+    F --> G["LangGraph AI Agent"]
+    G --> H{"Human Approval"}
+    H -->|Approved| I["Apply Correction"]
+    H -->|Rejected| J["Keep Original Data"]
+    H -->|Amended| K["Update Quality Contract"]
+    I --> L["Validation and Incident Logging"]
+    J --> L
+    K --> L
+    L --> M["Streamlit Dashboard"]
 ```
+
+**Key principle:** The AI agent can detect issues and propose corrections, but data modifications require human approval.
 
 The pipeline processes data through Bronze, Silver, and Gold layers. The agent evaluates data quality at different stages and interacts with Snowflake to investigate incidents and propose remediation actions.
 
